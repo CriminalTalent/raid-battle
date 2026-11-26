@@ -1,0 +1,19 @@
+# Render(render.com) 블루프린트: 저장소를 연결하면 이 설정대로 서버가 만들어진다.
+# 무료(free) 플랜: 디스크가 없어서 서버가 재시작·재배포되면 러너·보스 데이터가 처음 상태로 돌아간다.
+#   또 15분 동안 접속이 없으면 잠들었다가, 다음 접속 때 30초~1분 뒤에 깬다.
+# 데이터를 계속 남기려면: plan 을 starter 로 바꾸고 아래 disk 부분의 # 을 지운다.
+services:
+  - type: web
+    name: raid
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/battles
+    envVars:
+      - key: RAID_ADMIN_PASSWORD
+        sync: false
+      - key: RAID_DATA_DIR
+        value: /data
+#    disk:
+#      name: raid-data
+#      mountPath: /data
+#      sizeGB: 1

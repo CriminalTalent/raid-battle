@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAID 로비</title>
+<link rel="stylesheet" href="/assets/raid.css">
+<script src="/assets/raid.js"></script>
+</head>
+<body>
+<div class="page">
+  <div class="card-h" style="margin:4px 0 12px"><h2 style="font-size:15px">진행 중인 레이드</h2>
+    <span class="sub">관전을 누르면 그 전투만 크게 볼 수 있어요. 참여자는 관리자가 보낸 개인 링크로 들어옵니다.</span></div>
+  <div class="lobby" id="list"></div>
+</div>
+<script>
+navBar('lobby');
+let data = { battles: [] }, skew = 0;
+async function load() {
+  data = await api('/api/battles');
+  skew = data.now - Math.floor(Date.now() / 1000);
+  const list = data.battles;
+  $('list').innerHTML = list.length ? list.map(b => `
+    <div class="card">
+      ${statusHTML(b, skew)}
+      ${bossHTML(b)}
+      <div class="units">${runnersHTML(b)}</div>
+      <div class="btns" style="margin-top:12px">
+        <a class="btn" href="/w/${encodeURIComponent(b.id)}" target="raid-watch">관전</a>
+        ${isAdmin() ? `<a class="btn" href="/admin#${encodeURIComponent(b.id)}" target="raid-admin">관리</a>` : ''}
+      </div>
+    </div>`).join('') : '<div class="card empty" style="grid-column:1/-1">아직 진행 중인 레이드가 없습니다. 전투가 시작되면 여기에 나타나요.</div>';
+}
+live(load);
+startTimers(() => data.battles, () => skew);
+</script>
+</body>
+</html>

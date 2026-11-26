@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAID 참여</title>
+<link rel="stylesheet" href="/assets/raid.css">
+<script src="/assets/raid.js"></script>
+</head>
+<body>
+<div class="page"><div id="root"><div class="card empty">불러오는 중…</div></div></div>
+<script>
+const token = location.pathname.startsWith('/p/') ? decodeURIComponent(location.pathname.slice(3)) : (new URLSearchParams(location.search).get('t') || '');
+navBar('play', `<a class="item on" href="${location.pathname + location.search}">참여</a>`);
+let me = null, battle = null, skew = 0, sending = false, flash = null;
+let pick = { skill: null, runners: [], cell: null, sub: null };
+const reset = () => { pick = { skill: null, runners: [], cell: null, sub: null }; };
+
+const skillOf = n => [...(me.skills || []), ...(me.items || [])].find(s => s.name === n);
+const myPos = () => ((battle.runners || []).find(r => r.name === me.me) || {}).pos || me.my_pos;
+function rangeSet(s) {
+  const set = new Set(), from = myPos();
+  if (!s || s.item || !from || s.range === '자신' || s.range === '-' || !s.range) return set;
+  if (s.kind === 'teleport') { COLS.forEach(x => ROWS.forEach(y => { if (chebyshev(from, x + y) === 1) set.add(x + y); })); return set; }
+  COLS.forEach(x => ROWS.forEach(y => { if (inRange(from, x + y, s.range)) set.add(x + y); }));
+  return set;
+}
+
+async function load() {
+  try {
+    const [p, all] = await Promise.all([api('/api/play?t=' + encodeURIComponent(token)), api('/api/battles')]);
+    me = p; battle = (all.battles || []).find(b => b.id === p.battle_id);
+    skew = all.now - Math.floor(Date.now() / 1000);
+    if (me.submitted) reset();
+    render();
+  } catch (e) { $('root').innerHTML = `<div class="card msg err">${esc(e.message)}</div>`; }
+}
+
+async function submit(command) {
+  if (sending) return;
+  sending = true;
+  try {
+    const r = await api('/api/play', { t: token, command });
+    flash = r.notice ? { cls: 'err', text: r.notice.text } : null;
+    if (!r.notice) reset();
+  } catch (e) { flash = { cls: 'err', text: e.message }; }
+  sending = false;
+  await load();
+}
+
+function command() {
+  const s = skillOf(pick.skill); if (!s) return null;
+  const c = battle.creature?.name || '';
+  switch (s.target) {
+    case 'none': return `[${s.name}]`;
+    case 'creature': return `[${s.name}/${c}]`;
+    case 'creature_cell': return pick.cell ? `[${s.name}/${c}/${pick.cell}]` : null;
+    case 'cell': return pick.cell ? `[${s.name}/${pick.cell}]` : null;
+    case 'runner': return pick.runners.length ? `[${s.name}/${pick.runners.join(',')}]` : null;
+    case 'runner_cell': return pick.runners.length && pick.cell ? `[${s.name}/${pick.runners[0]}/${pick.cell}]` : null;
+    case 'runner_skill': return pick.runners.length && pick.sub ? `[${s.name}/${pick.runners.join(',')}/${pick.sub}]` : null;
+  }
+  return null;
+}
+
+// 고른 행동을 사람이 읽는 문장으로: "공격 → 연습용 트롤"
+function commandText() {
+  const s = skillOf(pick.skill); if (!s) return '';
+  const nm = n => ((battle.runners || []).find(r => r.name === n) || {}).display || n;
+  const parts = [];
+  if (['creature', 'creature_cell'].includes(s.target)) parts.push(battle.creature?.name || '보스');
+  if (pick.runners.length && ['runner', 'runner_cell', 'runner_skill'].includes(s.target)) parts.push(pick.runners.map(nm).join(', '));
+  if (pick.cell && ['cell', 'creature_cell', 'runner_cell'].includes(s.target)) parts.push(pick.cell);
+  if (pick.sub && s.target === 'runner_skill') parts.push(pick.sub);
+  return s.name + (parts.length ? ' → ' + parts.join(' · ') : '');
+}
+// 행동이 다 정해지면 누른 자리 옆에 "사용하시겠습니까?" 확인창
+// 스킬을 누른 뒤: 필요한 것을 차례대로 마우스 옆에 물어본다 (대상 → 스킬 → 칸 → 확인)
+function askSubmit(ev) {
+  if (!ev) return;
+  const s = skillOf(pick.skill); if (!s) return;
+  const cmd = command();
+  if (cmd) return confirmPop(ev, `${commandText()}, 사용하시겠습니까?`, () => submit(cmd));
+  const needRunner = ['runner', 'runner_cell', 'runner_skill'].includes(s.item ? 'runner' : s.target);
+  if (needRunner && !pick.runners.length) {
+    const inr = rangeSet(s), max = s.item ? 1 : (s.target === 'runner' ? s.max_targets : 1);
+    const items = (battle.runners || []).filter(r => r.hp > 0).map(r => {
+      const ok = s.item || s.range === '제한 없음' || r.name === me.me || inr.has(r.pos);
+      return { value: r.name, label: r.display + (r.name === me.me ? ' (나)' : ''), note: ok ? `${r.hp}/${r.max_hp}` : '멀어요' };
+    });
+    return choicePop(ev, `${s.name} · 대상${max > 1 ? ` (최대 ${max}명)` : ''}`, items, (v, e) => { pick.runners = v; render(); askSubmit(e); }, { max });
+  }
+  if (s.target === 'runner_skill' && !pick.sub) {
+    const items = me.skills.filter(x => x.kind !== 'pass' && x.kind !== 'teleport').map(x => ({ value: x.name, label: x.name }));
+    return choicePop(ev, '초기화할 스킬', items, (v, e) => { pick.sub = v[0]; render(); askSubmit(e); });
+  }
+  if (['cell', 'creature_cell', 'runner_cell'].includes(s.target) && !pick.cell)
+    return hintPop(ev, s.target === 'cell' ? '격자에서 파란 칸(옮길 곳)을 누르세요.' : '격자에서 칸을 누르세요.');
+}
+
+const HINT = {
+  none: '대상이 필요 없어요. 바로 제출하면 됩니다.',
+  creature: '크리쳐가 닿는 칸 중 하나라도 파란 사거리 안이면 됩니다.',
+  creature_cell: '격자에서 크리쳐 바로 옆, 직선상에 있는 도착 칸을 누르세요.',
+  cell: '격자에서 파란 칸(바로 옆 8칸) 중 하나를 누르세요.',
+  runner: '대상을 고르세요.',
+  runner_cell: '대상 한 명을 고르고, 격자에서 옮길 칸을 누르세요.',
+  runner_skill: '대상과 초기화할 스킬을 고르세요.'
+};
+
+let cardOk = false;
+// 대기실에서 보여 주는 내 캐릭터 카드
+function cardHTML() {
+  const c = me.card || {}, t = me.team || {};
+  const sk = (me.skills || []).map(x => `<span class="tag">${esc(x.name)}</span>`).join(' ');
+  const eq = (me.equipment || []).map(e => `${esc(e.name)}${e.bonus ? ' (' + esc(e.bonus) + ')' : ''}`).join(' · ') || '없음';
+  const it = (me.items || []).map(i => `${esc(i.name)} ×${i.count}`).join(' · ') || '없음';
+  return `<div class="charcard">${avatarHTML(me.display, c.role, c.img, 'lg')}
+    <div class="cc-body"><div class="cc-name">${esc(me.display)} ${c.role ? `<span class="role ${esc(c.role)}">${esc(c.role)}</span>` : ''}</div>
+      <div class="cc-hp"><span>건강</span><b>${c.hp ?? '-'} / ${c.max_hp ?? '-'}</b></div><div class="bar"><i style="width:${pct(c.hp || 0, c.max_hp || 1)}%"></i></div>
+      <div class="cc-stats">${(c.stats || []).map(([l, v]) => `<div><span>${esc(l)}</span><b>${v}</b></div>`).join('')}</div>
+      <div class="kv" style="margin-top:8px"><span>팀</span><span>${esc(t.team || '없음')}${t.passive ? ` · 패시브 <b>${esc(t.passive)}</b> (${esc(t.desc || '')})` : ''}</span>
+        <span>스킬</span><span>${sk || '없음'}</span><span>장비</span><span>${eq}</span><span>소지품</span><span>${it}</span></div></div></div>`;
+}
+function actionHTML() {
+  if (!me.active) return '<div class="msg info">전투가 끝났습니다.</div>';
+  const mine = (battle.runners || []).find(r => r.name === me.me);
+  if (mine && mine.hp <= 0) return '<div class="msg err">전투불능 상태예요. 이번 전투는 관전만 할 수 있어요.</div>';
+  if (me.phase === 'lobby') return cardHTML() + (me.ready
+    ? `<div class="msg ok">준비 완료! 관리자가 전투를 시작하면 시작 위치를 고를 수 있어요.</div><div class="btns" style="margin-top:8px"><button class="sm ghost" id="unready">준비 취소</button></div>`
+    : `<div class="msg info">내 캐릭터 정보가 맞는지 확인하세요. 틀린 곳이 있으면 채팅으로 진행자에게 알려 주세요. 진행자가 고치면 이 화면에 바로 반영돼요.</div>
+       <label class="chk"><input type="checkbox" id="cardok" ${cardOk ? 'checked' : ''}> 내 캐릭터 정보를 확인했어요</label>
+       <div class="btns" style="margin-top:8px"><button class="primary" id="ready" ${cardOk ? '' : 'disabled'}>준비 완료</button></div>`);
+  if (me.phase === 'prep') return me.prep_done
+    ? `<div class="msg ok">시작 위치 ${esc(me.my_pos)} 등록 완료. 다른 칸을 누르면 바꿀 수 있어요.</div>`
+    : '<div class="msg info">격자에서 시작할 빈 칸을 누르세요.</div>';
+  if (me.phase !== 'battle') return `<div class="msg info">${esc(PHASE[me.phase] || '잠시 기다려 주세요')}…</div>`;
+  if (me.submitted) return `<div class="msg ok">제출 완료 · ${esc(me.submitted.type)}${me.submitted.target ? ' → ' + esc(String(me.submitted.target).split(',').map(t => ((battle.runners || []).find(r => r.name === t.trim()) || {}).display || t).join(', ')) : ''}\n다른 사람을 기다리는 중이에요.</div>`;
+
+  let h = '<div class="actions">';
+  me.skills.forEach(s => {
+    const blocked = s.left > 0 || s.used_once;
+    const note = s.used_once ? '사용함' : (s.left > 0 ? `${s.left}R` : '');
+    h += `<button data-skill="${esc(s.name)}" class="${pick.skill === s.name ? 'on' : ''}" ${blocked ? 'disabled' : ''} title="${esc(s.desc)}">${esc(s.name)}${note ? ` <span class="tag">${note}</span>` : ''}</button>`;
+  });
+  h += '</div>';
+  if ((me.items || []).length) {
+    h += '<div class="sec">아이템</div><div class="actions items">' + me.items.map(it =>
+      `<button data-skill="${esc(it.name)}" class="item ${pick.skill === it.name ? 'on' : ''}" title="${esc(it.desc)}">${esc(it.name)} <span class="tag">×${it.count}</span></button>`).join('') + '</div>';
+  }
+  if (me.team) h += `<div class="sub" style="margin-top:8px">팀 ${esc(me.team.team)}${me.team.passive ? ` · 패시브 <b>${esc(me.team.passive)}</b> (${esc(me.team.desc)})` : ''}</div>`;
+  if ((me.equipment || []).length) h += `<div class="sub" style="margin-top:8px">장비: ${me.equipment.map(e => `${esc(e.name)}${e.bonus ? ' (' + esc(e.bonus) + ')' : ''}`).join(' · ')}</div>`;
+  const s = skillOf(pick.skill);
+  if (!s) return h + '<div class="sub" style="margin-top:8px">스킬이나 아이템을 고르세요.</div>';
+
+  h += s.item
+    ? `<div class="kv" style="margin-top:10px"><span>효과</span><span>건강 +${s.value}${s.desc ? ' · ' + esc(s.desc) : ''}</span><span>사거리</span><span>제한 없음 (1명)</span><span>남은 개수</span><span>${s.count}개 (정산 때 1개 줄어요)</span></div>`
+    : `<div class="kv" style="margin-top:10px"><span>효과</span><span>${esc(s.desc)}</span><span>사거리</span><span>${esc(s.range || '-')}</span><span>쿨타임</span><span>${esc(s.cooldown)}</span></div>`;
+  h += `<div class="sec">대상</div><div class="sub" style="margin-bottom:6px">${s.item ? '회복할 사람 한 명을 고르세요.' : HINT[s.target] || ''}</div>`;
+  if (['runner', 'runner_cell', 'runner_skill'].includes(s.target)) {
+    const inr = rangeSet(s), max = s.target === 'runner' ? s.max_targets : 1;
+    h += '<div class="btns">' + (battle.runners || []).filter(r => r.hp > 0).map(r => {
+      const ok = r.name === me.me || inr.has(r.pos), on = pick.runners.includes(r.name);
+      return `<button data-runner="${esc(r.name)}" data-max="${max}" class="${on ? 'on' : ''}">${esc(r.display)}${r.name === me.me ? ' (나)' : ''}${ok ? '' : ' <span class="tag">멀어요</span>'}</button>`;
+    }).join('') + '</div>';
+    if (max > 1) h += `<div class="sub" style="margin-top:4px">최대 ${max}명까지 고를 수 있어요.</div>`;
+  }
+  if (s.target === 'runner_skill') {
+    h += '<div class="btns" style="margin-top:6px">' + me.skills.filter(x => x.kind !== 'pass' && x.kind !== 'teleport').map(x =>
+      `<button class="sm ${pick.sub === x.name ? 'on' : ''}" data-sub="${esc(x.name)}">${esc(x.name)}</button>`).join('') + '</div>';
+  }
+  if (['cell', 'creature_cell', 'runner_cell'].includes(s.target)) h += `<div class="sub" style="margin-top:6px">고른 칸: <b>${pick.cell || '없음'}</b></div>`;
+  const cmd = command();
+  h += `<div class="btns" style="margin-top:12px"><button class="primary" id="go" ${cmd ? '' : 'disabled'}>제출</button><button class="ghost" id="cancel">취소</button>
+        <span class="sub" style="align-self:center">${cmd ? esc(cmd) : ''}</span></div>`;
+  return h;
+}
+
+function legendHTML(s) {
+  if (!s) return '<span class="sub">스킬에 마우스를 올리면 사거리가 격자에 표시돼요.</span>';
+  if (s.item) return `<span class="sub">${esc(s.name)} · 사거리 제한 없음 (1명)</span>`;
+  const n = rangeSet(s).size;
+  return `<span class="key inr"></span><span>${esc(s.name)} 사거리 ${esc(s.range || '-')}</span>${n ? '' : ' <span class="sub">(자신에게만 / 사거리 없음)</span>'}<span class="key bs"></span><span>보스 범위</span>`;
+}
+function previewRange(s) {
+  const set = rangeSet(s);
+  document.querySelectorAll('#grid .cell').forEach(c => c.classList.toggle('inrange', set.has(c.dataset.pos)));
+  const l = $('legend'); if (l) l.innerHTML = legendHTML(s);
+}
+function render() { keepInputs(draw); overlayEvents(battle ? [battle] : []); initRings(() => battle ? [battle] : [], () => skew); }
+function draw() {
+  if (!battle) { $('root').innerHTML = '<div class="card empty">전투 정보를 기다리는 중…</div>'; return; }
+  document.title = `RAID · ${me.display}`;
+  const s = skillOf(pick.skill);
+  const occupied = new Set([...(battle.creature?.cells || []), ...(battle.runners || []).filter(r => r.hp > 0).map(r => r.pos)]);
+  let pickable = null;
+  if (me.active && me.phase === 'prep') pickable = p => !occupied.has(p) || p === me.my_pos;
+  if (me.active && me.phase === 'battle' && !me.submitted && s && ['creature_cell', 'runner_cell'].includes(s.target)) pickable = p => !occupied.has(p);
+  if (me.active && me.phase === 'battle' && !me.submitted && s && s.target === 'cell') pickable = p => !occupied.has(p) && chebyshev(myPos(), p) === 1;
+
+  const moveSet = s && s.target === 'cell' ? new Set(COLS.flatMap(x => ROWS.map(y => x + y)).filter(p => chebyshev(myPos(), p) === 1 && !occupied.has(p))) : null;
+  const actCard = `<div class="card"><div class="card-h"><h2>내 행동</h2></div>
+        ${flash ? `<div class="msg ${flash.cls}">${esc(flash.text)}</div>` : ''}${actionHTML()}</div>`;
+  $('root').innerHTML = `
+  <div class="stage">
+    <div class="leftcol"><div class="card"><div class="panel-h">러너 팀</div>${teamHTML(battle, me.me)}</div>
+      <div class="card chatcard"><div class="card-h"><h2>채팅</h2><span class="sub">참여자·진행자</span></div>${chatHTML(battle, { mine: 'p:' + me.me, canSend: true })}</div></div>
+    <div>
+      ${battle.phase === 'lobby' ? actCard : ''}
+      <div class="card center">
+        <div class="status" style="text-align:left"><span><b>${battle.phase === 'lobby' ? '대기' : battle.phase === 'prep' ? '준비' : battle.round + '라운드'}</b> <span class="sub">${esc(battle.active ? (PHASE[battle.phase] || '') : '전투 종료')}</span></span>
+          <span class="timer">${myPos() ? '내 위치 ' + esc(myPos()) : ''}</span></div>
+        <div id="grid">${gridHTML(battle, { me: me.me, pickable, inrange: moveSet || (s ? rangeSet(s) : null), picks: new Set(pick.cell ? [pick.cell] : []) })}</div>
+        <div class="legend" id="legend">${legendHTML(s)}</div>
+        ${ringHTML(battle, skew)}
+        <div class="sub">${esc(me.display)} 님${battle.phase === 'battle' ? ' · 행동 입력 마감까지' : ''}</div>
+      </div>
+      ${battle.phase !== 'lobby' ? actCard : ''}
+    </div>
+    <div>
+      <div class="card"><div class="panel-h boss">보스</div>${bossCardHTML(battle)}</div>
+      <div class="card"><div class="card-h"><h2>응원</h2></div>${cheerFeedHTML(battle, 4)}</div>
+      <div class="card"><div class="card-h"><h2>전투 기록</h2></div><div class="log" style="max-height:380px">${logHTML(battle, battle.active ? 8 : 200)}</div></div>
+    </div>
+  </div>`;
+
+  bindGrid($('grid'), (p, ev) => {
+    if (me.phase === 'prep') return confirmPop(ev, `${p}, 이곳에 서겠습니까?`, () => submit(`[${p}]`));
+    pick.cell = p; flash = null; render(); askSubmit(ev);
+  });
+  document.querySelectorAll('[data-skill]').forEach(b => b.onclick = ev => { reset(); pick.skill = b.dataset.skill; flash = null; render(); askSubmit(ev); });
+  document.querySelectorAll('[data-runner]').forEach(b => b.onclick = ev => {
+    const n = b.dataset.runner, max = +b.dataset.max;
+    if (pick.runners.includes(n)) pick.runners = pick.runners.filter(x => x !== n);
+    else pick.runners = max > 1 ? [...pick.runners, n].slice(-max) : [n];
+    render(); askSubmit(ev);
+  });
+  document.querySelectorAll('[data-sub]').forEach(b => b.onclick = ev => { pick.sub = b.dataset.sub; render(); askSubmit(ev); });
+  if ($('go')) $('go').onclick = () => submit(command());
+  if ($('cardok')) $('cardok').onchange = () => { cardOk = $('cardok').checked; render(); };
+  if ($('ready')) $('ready').onclick = () => api('/api/ready', { t: token, on: true }).then(load).catch(e => { flash = { cls: 'err', text: e.message }; render(); });
+  if ($('unready')) $('unready').onclick = () => api('/api/ready', { t: token, on: false }).then(load).catch(e => { flash = { cls: 'err', text: e.message }; render(); });
+  if ($('cancel')) $('cancel').onclick = () => { reset(); render(); };
+  bindChat((id, text) => api('/api/chat', { t: token, text }));
+  // 스킬 버튼에 마우스를 올리면 사거리를 미리 보여 준다
+  document.querySelectorAll('[data-skill]').forEach(b => {
+    b.onmouseenter = () => previewRange(skillOf(b.dataset.skill));
+    b.onmouseleave = () => previewRange(skillOf(pick.skill));
+  });
+}
+
+live(load);
+startTimers(() => battle ? [battle] : [], () => skew);
+</script>
+</body>
+</html>
