@@ -1,0 +1,1597 @@
+$stdout.sync = true
+$stderr.sync = true
+
+require 'dotenv'
+require 'json'
+require 'time'
+require 'net/http'
+require 'uri'
+require 'set'
+
+Dotenv.load(File.join(__dir__, '.env'))
+
+require_relative 'sheet_manager'
+require_relative 'mastodon_listener'
+require_relative 'battle_calculator'
+require_relative 'battle_util'
+require_relative 'battle_api'
+require_relative 'battle_state'
+require_relative 'battle_grid'
+require_relative 'battle_skills'
+require_relative 'battle_boss_patterns'
+require_relative 'battle_round'
+require_relative 'battle_session'
+require_relative 'scout_directions'
+require_relative 'talk_lines'
+require_relative 'web_state'
+require_relative 'web_server'
+
+RUNNER_SHEET_ID   = ENV['RUNNER_SHEET_ID']
+CREATURE_SHEET_ID = ENV['CREATURE_SHEET_ID']
+VIEW_SHEET_ID     = ENV['VIEW_SHEET_ID']
+TRIGGER_SHEET_ID  = '1FIvnRTLlcDmx29TShi7XnX9uGYuEc-YC63B9b4Z1IHE'
+CREDENTIALS_PATH  = File.join(__dir__, 'credentials.json')
+BOT_USERNAME      = ENV['BOT_USERNAME'] || 'DOWN'
+
+# 승리/패배 후 조사맵 이동 가능 방향을 보여주기 위한
+# 조사봇(TH3V151T0R5_F) 시트. 설정하지 않으면 방향 안내를 생략한다.
+SCOUT_SHEET_ID      = ENV['SCOUT_SHEET_ID']
+SCOUT_GRID_SHEET_ID = ENV['SCOUT_GRID_SHEET_ID']
+
+ROUND_WAIT_SECONDS = 60
+ACTION_WAIT_SECONDS = 300
+TRIGGER_CHECK_INTERVAL = 15
+POST_INTERVAL_SECONDS = 1.5
+
+LOCATION_MAP = {
+  '스토디시' => 'E7',
+  'A' => 'A1', 'B' => 'B1', 'C' => 'C1', 'D' => 'D1',
+  'E' => 'E1', 'F' => 'F1', 'G' => 'G1'
+}
+
+puts '[전투봇] 시작'
+
+runner_sheet   = SheetManager.new(RUNNER_SHEET_ID, CREDENTIALS_PATH)
+creature_sheet = SheetManager.new(CREATURE_SHEET_ID, CREDENTIALS_PATH)
+view_sheet     = SheetManager.new(VIEW_SHEET_ID, CREDENTIALS_PATH)
+listener       = MastodonListener.new(ENV['MASTODON_BASE_URL'], ENV['BATTLE_TOKEN'])
+
+scout_sheet      = SCOUT_SHEET_ID.to_s.strip.empty? ? nil : SheetManager.new(SCOUT_SHEET_ID, CREDENTIALS_PATH)
+$battle_scout_sheet = scout_sheet
+scout_grid_sheet = SCOUT_GRID_SHEET_ID.to_s.strip.empty? ? nil : SheetManager.new(SCOUT_GRID_SHEET_ID, CREDENTIALS_PATH)
+
+$trigger_sheet = SheetManager.new(TRIGGER_SHEET_ID, CREDENTIALS_PATH)
+
+puts '[전투봇] 초기화 완료 - 다중 전투 세션 모드'
+
+processed_statuses = Set.new
+processed_dm_ids = Set.new
+processed_notification_ids = Set.new
+processed_action_status_ids = Set.new
+handled_boss_status_ids = Set.new
+held_boss_logged_ids = Set.new
+handled_battle_end_status_ids = Set.new
+sessions = {}
+last_post_time = Time.at(0)
+
+# 전투 시작 거절/오류 안내: 시작한 사람을 태그하고 그 글에 답장(스레드)으로 올린다.
+# 시작한 글이 공개/미등재가 아니면 DM으로 보낸다.
+def battle_notice(status, text)
+  who = status.dig('account', 'username').to_s.strip
+  dm = !%w[public unlisted private].include?(status['visibility'].to_s)
+  post_battle_thread("#{who.empty? ? '' : "@#{who} "}#{text}", dm, status['id'])
+rescue => e
+  puts "[전투봇] 시작 안내 게시 실패: #{e.class}: #{e.message}"
+  nil
+end
+
+# 캐시 초기화 글을 경로(DM/공개/멘션)와 상관없이 한 번만 처리한다.
+$cache_reset_seen = {}
+def cache_reset_once?(status_id)
+  sid = status_id.to_s
+  return false if sid.empty?
+  return false if $cache_reset_seen[sid]
+  $cache_reset_seen[sid] = true
+  $cache_reset_seen.shift while $cache_reset_seen.size > 500
+  true
+end
+
+def create_battle_session_from_status(status, content, mode, creature_sheet, bot_username, fallback_sender = nil)
+  usernames = extract_usernames_from_status(status, content, bot_username)
+  usernames = usernames.map { |u| u.to_s.gsub('@', '').strip }.reject(&:empty?).uniq
+
+  if usernames.empty? && fallback_sender
+    usernames = [fallback_sender.to_s.gsub('@', '').strip]
+  end
+
+  return nil if usernames.empty?
+
+  # 현상금 사냥은 참여 인원이 최대 BOUNTY_MAX_RUNNERS(기본 4)명이다.
+  bounty_limit = (ENV['BOUNTY_MAX_RUNNERS'] || '4').to_i
+  if bounty_start_match(content) && bounty_limit > 0 && usernames.size > bounty_limit
+    battle_notice(status, "[현상금] 참여 인원은 최대 #{bounty_limit}명입니다. (현재 #{usernames.size}명) 인원을 줄여 다시 시도해주세요.")
+    status['__rejected'] = true
+    puts "[전투봇] 현상금 시작 거절: 인원 초과 #{usernames.size}/#{bounty_limit}"
+    return nil
+  end
+
+  # 결투(도전 대기 포함) 중인 참가자는 크리쳐 전투를 시작할 수 없다.
+  if defined?(DUEL_MANAGER)
+    busy_now = usernames.select { |u| DUEL_MANAGER.busy?(u) }
+    unless busy_now.empty?
+      sender_name = status.dig('account', 'username').to_s.strip
+      tag_names = ([sender_name] + busy_now).reject(&:empty?).uniq
+      begin
+        post_battle_thread("#{tag_names.map { |u| "@#{u}" }.join(' ')} 결투 중인 참가자가 있어 크리쳐 전투를 시작할 수 없습니다. 결투가 끝난 뒤 다시 시작해주세요.", true, status['id'])
+      rescue => e
+        puts "[전투봇] 결투 중 참가자 안내 실패: #{e.class}: #{e.message}"
+      end
+      puts "[전투봇] 크리쳐 전투 시작 보류: 결투 중인 참가자 #{busy_now.join(', ')}"
+      status['__rejected'] = true
+      return nil
+    end
+  end
+
+  creature = creature_from_start_content(content, creature_sheet)
+  creature[:pos] = 'D4' if creature[:pos].to_s.strip.empty?
+
+  session = BattleSession.new(
+    id: status['id'],
+    mode: mode,
+    runner_names: usernames,
+    creature: creature.dup,
+    thread_reply_id: status['id'],
+    round: content.match(/\[(\d+)\]/)&.[](1) || 1
+  )
+  session.thread_ids ||= Set.new
+  session.thread_ids.add(status['id'].to_s)
+  session.auto_mode = false
+  session.dm_visibility = ($trigger_sheet.read_visibility != 'public')
+
+  bounty_match = bounty_start_match(content)
+  if bounty_match
+    session.bounty_pot = nil
+    session.bounty_per_person = nil
+    session.instance_variable_set(:@bounty_pending_pot, bounty_match[2].to_i)
+    # 현상금 사냥은 실행 탭 설정과 무관하게, 시작한 글의 공개 범위를 따른다.
+    # (DM으로 시작하면 DM, 공개 멘션으로 시작하면 공개 스레드. BOUNTY_PUBLIC=false 면 항상 DM)
+    public_start = %w[public unlisted private].include?(status['visibility'].to_s)
+    session.dm_visibility = !(public_start && ENV['BOUNTY_PUBLIC'].to_s.strip.downcase != 'false')
+  end
+
+  session
+end
+
+# 현상금 사냥 판돈을 검증하고 차감한다. 부족한 사람이 있으면 nil을 반환하고
+# 아무도 차감하지 않는다(전원 확인 후 일괄 처리, 부분 차감 방지).
+def apply_bounty_pot!(session, scout_sheet, creature_sheet)
+  pot = session.instance_variable_get(:@bounty_pending_pot)
+  return true unless pot
+  return true unless pot.to_i > 0
+
+  runners = session.runner_names
+  today = Time.now.strftime('%Y-%m-%d')
+
+  # 하루 참여 제한은 해제됨(2026-10-31). BOUNTY_DAILY_LIMIT=on 이면 1인 1일 1회 제한을 다시 적용한다.
+  already = if ENV['BOUNTY_DAILY_LIMIT'].to_s.strip.downcase == 'on'
+              runners.select { |acct| creature_sheet.bounty_participated_today?(acct, today) }
+            else
+              []
+            end
+  unless already.empty?
+    session.instance_variable_set(:@bounty_pending_pot, nil)
+    return [:already_participated, already, nil]
+  end
+
+  per_person = (pot.to_i + runners.size - 1) / runners.size
+
+  shortfalls = []
+  runners.each do |acct|
+    credit = ScoutDirections.get_credit(scout_sheet, acct)
+    shortfalls << acct if credit.nil? || credit < per_person
+  end
+
+  unless shortfalls.empty?
+    session.instance_variable_set(:@bounty_pending_pot, nil)
+    return [false, shortfalls, per_person]
+  end
+
+  runners.each do |acct|
+    ScoutDirections.add_credits(scout_sheet, acct, -per_person)
+    creature_sheet.mark_bounty_participated!(acct, today)
+  end
+
+  session.bounty_pot = per_person * runners.size
+  session.bounty_per_person = per_person
+  session.instance_variable_set(:@bounty_pending_pot, nil)
+  [true, nil, per_person]
+end
+
+def post_session_thread(session, text, last_post_time)
+  # 세션 시작 시 한 번 읽어 고정한 값을 재사용합니다 (매 안내마다 시트를
+  # 다시 읽지 않음). 혹시 세션에 값이 없는 예외 상황이면 그때만 폴백으로 읽습니다.
+  dm = session.dm_visibility
+  dm = ($trigger_sheet.read_visibility != 'public') if dm.nil?
+  now = Time.now
+  sleep_time = POST_INTERVAL_SECONDS - (now - last_post_time)
+  sleep(sleep_time) if sleep_time > 0
+
+  # 매 안내가 직전 안내글에 이어서 답장으로 달리도록, 마지막으로 게시한
+  # 툿 ID를 다음 안내의 답장 대상으로 갱신합니다.
+  response = post_battle_thread(text, dm, session.thread_reply_id)
+  WebState.record_post(session, text) if response && response['id']
+  if response && response['id']
+    session.mark_thread_id(response['id'])
+    session.thread_ids ||= Set.new
+    Array(response['all_ids']).each { |id| session.thread_ids.add(id.to_s) }
+    session.thread_ids.add(response['id'].to_s)
+
+    if response['partial']
+      puts "[전투봇] [세션 #{session.id}] 안내 분할 툿 일부만 게시됨 (#{response['sent_count']}/#{response['expected_count']}) — 재시도 예정"
+    end
+  end
+  [response, Time.now]
+end
+
+def sheet_log(creature_sheet, session_id, round, event, detail)
+  return unless creature_sheet
+  time = Time.now.strftime('%Y-%m-%d %H:%M:%S')
+  creature_sheet.append_battle_log([time, session_id.to_s, round.to_s, event.to_s, detail.to_s])
+rescue => e
+  puts "[전투로그 기록 실패] #{e.class}: #{e.message}"
+end
+
+# 운영진 전용: 보스스킬 시트 캐시를 강제로 비워 다음 조회 때 새로 읽게 한다.
+# 보스스킬 탭(전조/대상수 등)을 수정한 뒤 봇 재시작 없이 즉시 반영하려면 사용.
+def cache_reset_text?(text)
+  text.to_s.include?('[스킬캐시초기화]')
+end
+
+def battle_start_text?(text)
+  text.to_s.include?('[전투시작]') || text.to_s.match?(/\[전투시작\//) || bounty_start_match(text)
+end
+
+def battle_end_text?(text)
+  text = text.to_s
+  text.include?('[전투종료]') ||
+    text.include?('[전투중단]') ||
+    text.include?('[전투강제종료]') ||
+    text.include?('[전투취소]') ||
+    text.include?('[전투 종료]') ||
+    text.include?('[전투 중단]')
+end
+
+def announce_prep_round(session, view_sheet, runner_sheet, last_post_time, sessions: nil)
+  ctx = session.passive_ctx
+  ctx[:positions] ||= {}
+
+  state = merge_runner_state(view_sheet, runner_sheet, session.runner_names, 'D3')
+  ctx[:prep_required] = state.select { |r| r[:hp].to_i > 0 }.map { |r| r[:name].to_s }
+  session.mark_dead_runners(state.select { |r| r[:hp].to_i <= 0 }.map { |r| r[:name].to_s })
+  WebState.update_runners(session, state)
+
+  map_lines = BattleGrid.render([], session.creature)
+
+  # 다른 팀(다른 세션)의 몹은 노출하지 않습니다. 본인 세션의 몹 상태는
+  # 위 announcement에서 이미 별도로 표시됩니다.
+  raid_overview = ''
+
+  announcement = "#{session.runner_tags}\n\n" \
+                 "[준비 라운드] #{session.creature[:name]}와의 전투!\n" \
+                 "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'})\n\n" \
+                 "#{raid_overview}" \
+                 "점유칸: #{BattleGrid.occupied_cells_label(session.creature)}\n\n" \
+                 "전장\n\n" \
+                 "#{map_lines.join("\n")}\n" \
+                 "───────────────────\n" \
+                 "DM 또는 멘션으로 시작 위치를 입력해주세요.\n\n" \
+                 "형식: [좌표]\n" \
+                 "입력 대기: 5분\n" \
+                 "───────────────────"
+
+  response, new_time = post_session_thread(session, announcement, last_post_time)
+  if response && response['id'] && !response['partial']
+    session.announced = true
+    session.phase = :prep
+    puts "[전투봇] [세션 #{session.id}] 준비 라운드 안내 송출"
+  else
+    session.announced = false
+    session.phase = :prep
+    puts "[전투봇] [세션 #{session.id}] 준비 라운드 안내 송출 실패#{response && response['partial'] ? ' (부분 게시)' : ''}"
+  end
+  new_time
+end
+
+def handle_prep_input(session, username, text, processed_set, processed_id, listener, global_set = nil, status_id = nil)
+  processed_set.add(processed_id)
+
+  sid = (status_id || processed_id).to_s
+  return if global_set && global_set.include?(sid)
+
+  m = text.to_s.match(/\[([A-Ga-g][1-8])\]/)
+  return unless m
+
+  global_set.add(sid) if global_set
+
+  pos = m[1].upcase
+  if BattleGrid.creature_cells(session.creature).include?(pos)
+    listener.send_dm(username, "#{pos}은(는) #{session.creature[:name]}이(가) 점유한 칸입니다. 다른 좌표를 입력 해주세요.")
+    return
+  end
+
+  (session.passive_ctx[:positions] ||= {})[username.to_s] = pos
+  puts "[전투봇] [세션 #{session.id}] 시작 위치 등록: @#{username} → #{pos}"
+end
+
+def check_prep_completion(session, creature_sheet = nil)
+  return unless session.active && session.phase == :prep && session.announced
+
+  ctx = session.passive_ctx
+  required  = (ctx[:prep_required] || session.runner_names).map(&:to_s)
+  positions = ctx[:positions] || {}
+
+  all_set = required.any? && required.all? { |name| positions[name].to_s.match?(/\A[A-G][1-8]\z/) }
+  timeout = (Time.now - session.start_time) >= ACTION_WAIT_SECONDS
+  return unless all_set || timeout
+
+  session.awaiting_boss = false
+  session.phase = :announcing
+  ctx[:boss_override] = { skill: '전체공격' }
+  session.announced = false
+  session.actions = {}
+  session.processed_messages = {}
+  session.start_time = Time.now
+  puts "[전투봇] [세션 #{session.id}] 준비 라운드 완료 - #{session.round}라운드 시작 (보스 행동: 전체공격 고정)"
+  positions_text = positions.map { |k, v| "#{k}→#{v}" }.join(', ')
+  sheet_log(creature_sheet, session.id, session.round, '준비 라운드 완료',
+            "시작 위치: #{positions_text} / #{session.round}라운드 시작 (보스 행동: 전체공격 고정)")
+end
+
+def boss_command_text?(text)
+  text.to_s.match?(/\[보스행동커맨드\//)
+end
+
+def try_boss_command!(sessions, sender, status, text, creature_sheet, quiet_hold: false)
+  sender_clean = sender.to_s.gsub('@', '').strip
+  return :pass if sender_clean.empty?
+  return :pass if defined?(BOT_USERNAME) && sender_clean == BOT_USERNAME.to_s.gsub('@', '').strip
+  return :pass if sessions.values.any? { |s| s.includes_runner?(sender_clean) }
+
+  skill = nil
+  args  = nil
+
+  if (m = text.to_s.match(/\[보스행동커맨드\/([^\]]+)\]/))
+    args = m[1]
+  elsif (m = text.to_s.match(/\[([^\/\]]+)(?:\/([^\]]+))?\]/))
+    cand = m[1].to_s.strip
+    return :pass unless boss_skill_defined?(creature_sheet, cand)
+    skill = cand
+    args = m[2]
+  else
+    return :pass
+  end
+
+  status_id = status['id'].to_s
+  if status && status['in_reply_to_id']
+    root_or_thread_id = status['in_reply_to_id'].to_s
+    candidate_sessions = sessions.values.select do |s|
+      s.awaiting_boss && (s.id.to_s == root_or_thread_id || s.thread_ids.to_a.include?(root_or_thread_id))
+    end
+
+    if candidate_sessions.length == 1
+      session = candidate_sessions.first
+    elsif candidate_sessions.length > 1
+      unless quiet_hold
+        puts "[전투봇] 보스행동커맨드 보류: 타래 연결이 모호함 (#{candidate_sessions.length}개 세션 매치, 자동 재시도)"
+        sheet_log(creature_sheet, '-', '-', '보스행동커맨드 보류', "@#{sender_clean}: #{text.to_s.strip} (타래 모호, 자 동 재시도)")
+      end
+      return :hold
+    else
+      active_waiting = sessions.values.select(&:awaiting_boss)
+      if active_waiting.length == 1
+        session = active_waiting.first
+      elsif active_waiting.length > 1
+        unless quiet_hold
+          puts "[전투봇] 보스행동커맨드 보류: 타래 미연결 + 대기 세션 여럿 (자동 재시도)"
+          sheet_log(creature_sheet, '-', '-', '보스행동커맨드 보류', "@#{sender_clean}: #{text.to_s.strip} (타래 미연결, 대기 세션 #{active_waiting.length}개, 자동 재시도)")
+        end
+        return :hold
+      else
+        puts "[전투봇] 보스행동커맨드 무시: 대기 중인 세션 없음"
+        sheet_log(creature_sheet, '-', '-', '보스행동커맨드 무시', "@#{sender_clean}: #{text.to_s.strip} (대기 중인 세션 없음)")
+        return :ignored
+      end
+    end
+  else
+    active_waiting = sessions.values.select(&:awaiting_boss)
+    if active_waiting.length == 1
+      session = active_waiting.first
+    elsif active_waiting.length > 1
+      unless quiet_hold
+        puts "[전투봇] 보스행동커맨드 보류: 타래 미연결 + 대기 세션 여럿 (자동 재시도)"
+        sheet_log(creature_sheet, '-', '-', '보스행동커맨드 보류', "@#{sender_clean}: #{text.to_s.strip} (타래 미연결,  대기 세션 #{active_waiting.length}개, 자동 재시도)")
+      end
+      return :hold
+    else
+      puts "[전투봇] 보스행동커맨드 무시: 대기 중인 세션 없음"
+      sheet_log(creature_sheet, '-', '-', '보스행동커맨드 무시', "@#{sender_clean}: #{text.to_s.strip} (대기 중인 세션  없음)")
+      return :ignored
+    end
+  end
+
+  tokens = args.to_s.split(%r{[\/,]}).map(&:strip).reject(&:empty?)
+
+  if skill.nil? && tokens.any? && boss_skill_defined?(creature_sheet, tokens.first)
+    skill = tokens.shift
+  end
+
+  cells = tokens.select { |t| t.match?(/\A[A-Ga-g][1-8]\z/) }.map(&:upcase)
+
+  if cells.any? && cells.size == tokens.size
+    active_count = sessions.values.count { |s| s.active && s.awaiting_boss && s.id != session.id }
+    if cells.any? || skill == '전체공격'
+      if active_count > 0
+        puts "[전투봇] 보스행동커맨드 거부: 좌표/전체공격은 활성 세션이 유일할 때만 허용됨"
+        sheet_log(creature_sheet, session.id, session.round, '보스행동커맨드 거부', "@#{sender_clean}: 좌표/전체공격 (다른 활성 세션 존재)")
+        return :ignored
+      end
+    end
+  end
+
+  override = {}
+  override[:skill] = skill if skill
+  if cells.any? && cells.size == tokens.size
+    override[:cells] = cells
+  elsif tokens.any?
+    targets_clean = tokens.map { |t| t.gsub('@', '').strip }
+    state = merge_runner_state(view_sheet, runner_sheet, session.runner_names, 'D3')
+    begin
+      base_stats = runner_sheet.read_base_stats
+    rescue
+      base_stats = []
+    end
+    state.each do |r|
+      stat = base_stats.find { |b| b[:name].to_s.casecmp?(r[:name].to_s) }
+      label = stat ? stat[:display_name].to_s.strip : ''
+      r[:display_name] = label.empty? ? r[:name].to_s : label
+    end
+
+    invalid_targets = targets_clean.reject do |t|
+      state.any? { |r| r[:name].to_s == t || r[:display_name].to_s == t || r[:display_name].to_s.gsub(/\s+/, '') == t.gsub(/\s+/, '') }
+    end
+
+    if invalid_targets.any?
+      puts "[전투봇] [세션 #{session.id}] 보스행동커맨드 거부: 세션 외 대상 #{invalid_targets.join(', ')}"
+      sheet_log(creature_sheet, session.id, session.round, '보스행동커맨드 거부', "@#{sender_clean}: 세션 외 대상 #{invalid_targets.join(', ')}")
+      return :ignored
+    end
+
+    mapped = targets_clean.map do |t|
+      found = state.find do |r|
+        r[:name].to_s == t ||
+          r[:display_name].to_s == t ||
+          r[:display_name].to_s.gsub(/\s+/, '') == t.gsub(/\s+/, '')
+      end
+      found ? found[:name].to_s : t
+    end
+    override[:targets] = mapped
+  end
+
+  if override.empty?
+    puts '[전투봇] 보스행동커맨드 무시: 스킬/대상 없음'
+    sheet_log(creature_sheet, session.id, session.round, '보스행동커맨드 무시', "@#{sender_clean}: #{text.to_s.strip} ( 스킬/대상 없음)")
+    return :ignored
+  end
+
+  session.passive_ctx[:boss_override] = override
+  session.awaiting_boss = false
+  session.phase = :announcing
+  session.announced = false
+  session.actions = {}
+  session.processed_messages = {}
+  session.start_time = Time.now
+  desc = [skill, tokens.join(', ')].compact.reject { |v| v.to_s.empty? }.join(' / ')
+  puts "[전투봇] [세션 #{session.id}] 보스행동커맨드 적용 (@#{sender_clean}) → #{desc} / #{session.round}라운드"
+  sheet_log(creature_sheet, session.id, session.round, '보스행동커맨드 적용', "@#{sender_clean} → #{desc} / status=#{status_id}")
+  :applied
+end
+
+def announce_boss_turn(session, view_sheet, runner_sheet, last_post_time)
+  ctx = session.passive_ctx
+  positions = (ctx[:positions] ||= {})
+
+  state = merge_runner_state(view_sheet, runner_sheet, session.runner_names, 'D3')
+  begin
+    base_stats = runner_sheet.read_base_stats
+  rescue
+    base_stats = []
+  end
+  state.each do |r|
+    pos = positions[r[:name].to_s].to_s.upcase
+    r[:pos] = pos if pos.match?(/\A[A-G][1-8]\z/)
+    stat = base_stats.find { |b| b[:name].to_s.casecmp?(r[:name].to_s) }
+    label = stat ? stat[:display_name].to_s.strip : ''
+    r[:display_name] = label.empty? ? r[:name].to_s : label
+  end
+
+  alive_for_map = state.select { |r| r[:hp].to_i > 0 }
+  map_lines = BattleGrid.render(alive_for_map, session.creature)
+
+  announcement = "#{session.runner_tags}\n\n" \
+                 "[#{session.round}라운드] #{session.creature[:name]}와의 전투 - 보스 턴\n" \
+                 "#{session.creature[:name]} 상태: #{view_sheet.health_bar(session.creature[:hp], session.creature[:max_hp])} (위치: #{session.creature[:pos]}, 크기: #{session.creature[:size] || '1x1'} 방향: #{session.creature[:facing] || '하'})\n\n" \
+                 "점유칸: #{BattleGrid.occupied_cells_label(session.creature)}\n\n" \
+                 "전장\n\n" \
+                 "#{map_lines.join("\n")}\n" \
+                 "───────────────────\n" \
+                 "#{session.creature[:name]}이(가) 다음 행동을 준비하고 있습니다.\n" \
+                 "운영 계정의 보스 행동 입력 대기 중\n" \
+                 "───────────────────"
+
+  response, new_time = post_session_thread(session, announcement, last_post_time)
+  if response && response['id'] && !response['partial']
+    session.announced = true
+    session.phase = :boss_command
+    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 보스 턴 안내 송출"
+  else
+    session.announced = false
+    session.phase = :boss_command
+    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 보스 턴 안내 송출 실패#{response && response['partial'] ? ' (부분 게시)' : ''}"
+  end
+  new_time
+end
+
+def announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_time)
+  ctx = session.passive_ctx
+  positions = (ctx[:positions] ||= {})
+
+  state = merge_runner_state(view_sheet, runner_sheet, session.runner_names, 'D3')
+  begin
+    base_stats = runner_sheet.read_base_stats
+  rescue
+    base_stats = []
+  end
+  state.each do |r|
+    pos = positions[r[:name].to_s].to_s.upcase
+    r[:pos] = pos if pos.match?(/\A[A-G][1-8]\z/)
+    stat = base_stats.find { |b| b[:name].to_s.casecmp?(r[:name].to_s) }
+    label = stat ? stat[:display_name].to_s.strip : ''
+    r[:display_name] = label.empty? ? r[:name].to_s : label
+  end
+  session.mark_dead_runners(state.select { |r| r[:hp].to_i <= 0 }.map { |r| r[:name].to_s })
+
+  refresh_creature_skill!(session.creature, creature_sheet)
+  creature = session.creature
+
+  override = ctx.delete(:boss_override)
+  if override.is_a?(Hash)
+    if override[:skill].to_s.strip != ''
+      creature[:current_skill] = override[:skill].to_s.strip
+      creature[:pattern]       = creature[:current_skill]
+      apply_boss_skill_definition!(creature, creature_sheet)
+      ctx[:prev_boss_skill] = creature[:current_skill]
+    end
+    if override[:cells].to_a.any?
+      creature[:skill_range]   = override[:cells].join(',')
+      creature[:pattern_cells] = override[:cells].join(',')
+      creature[:skill_target]  = ''
+    elsif override[:targets].to_a.any?
+      mapped = override[:targets].map do |t|
+        found = state.find do |r|
+          r[:name].to_s == t ||
+            r[:display_name].to_s == t ||
+            r[:display_name].to_s.gsub(/\s+/, '') == t.gsub(/\s+/, '')
+        end
+        found ? found[:name].to_s : t
+      end
+      creature[:skill_target] = mapped.join(',')
+    end
+  end
+
+  boss_preview = ''
+  skill_name = BattleBossPatterns.pattern_name(creature)
+  if !skill_name.empty? && skill_name != '-'
+    whole = skill_name == '전체공격' ||
+            BattleBossPatterns.range_shape(creature) == '전체' ||
+            creature[:skill_range_default].to_s.strip == '전체'
+    cells  = BattleBossPatterns.pattern_cells(creature)
+    target = BattleBossPatterns.skill_target(creature)
+
+    if !whole && cells.empty? && target.empty?
+      alive = state.select { |r| r[:hp].to_i > 0 }
+      picked = alive.sample([BattleBossPatterns.target_count(creature), 1].max)
+      creature[:skill_target] = picked.map { |r| r[:name].to_s }.join(',')
+      target = creature[:skill_target]
+    end
+
+    display_of = lambda do |id|
+      found = state.find { |r| r[:name].to_s == id.to_s }
+      found ? found[:display_name].to_s : id.to_s
+    end
+
+    label = if whole
+              '전체'
+            elsif cells.any?
+              cells.join(', ')
+            elsif !target.empty?
+              target.split(',').map(&:strip).map { |t| display_of.call(t) }.join(', ')
+            else
+              ''
+            end
+
+    unless label.empty?
+      power = BattleBossPatterns.pattern_damage(creature, BattleBossPatterns.pattern_multiplier(creature))
+      boss_preview  = "공격 대상(범위): #{label}\n"
+      boss_preview += "위력: #{power}\n" if power.to_i > 0 && BattleBossPatterns.skill_category(creature) != '디버프'
+      boss_preview += "\n"
+    end
+  end
+
+  # 크리쳐가 러너 전용 지원/방어 스킬(자가구원 등)을 쓰기로 확정된 경우엔
+  # "공격 대상/위력" 형식이 아니라 스킬명만 안내한다.
+  creature_skill_def = BattleSkills.get(creature[:current_skill].to_s.strip)
+  if creature_skill_def && !BattleSkills.attack?(creature[:current_skill].to_s.strip)
+    boss_preview = "#{creature[:name]}이(가) #{creature[:current_skill]}을(를) 사용합니다.\n\n"
+  end
+
+  WebState.update_runners(session, state)
+
+  omen = creature[:omen].to_s.strip
+  omen_block = omen.empty? ? '' : "#{omen}\n\n"
+
+  alive_for_map = state.select { |r| r[:hp].to_i > 0 }
+  map_lines = BattleGrid.render(alive_for_map, creature)
+
+  creature_name = creature[:name].to_s.strip
+  creature_name = '보스이름' if creature_name.empty? || creature_name == '크리쳐'
+  attack_lines = ["[스킬명/#{creature_name}]"]
+
+  announcement = "#{session.runner_tags}\n\n" \
+                 "[#{session.round}라운드] #{creature[:name]}와의 전투!\n\n" \
+                 "#{omen_block}" \
+                 "#{boss_preview}" \
+                 "#{creature[:name]} 상태: #{view_sheet.health_bar(creature[:hp], creature[:max_hp])} (위치: #{creature[:pos]}, 크기: #{creature[:size] || '1x1'})\n\n" \
+                 "전장\n\n" \
+                 "#{map_lines.join("\n")}\n" \
+                 "───────────────────\n" \
+                 "DM 또는 멘션으로 행동을 입력해주세요.\n\n" \
+                 "형식:\n" \
+                 "공격: #{attack_lines.join("\n")}\n" \
+                 "지원: [스킬명/아이디]\n" \
+                 "방어: [스킬명/아이디]\n" \
+                 "순간이동: [순간이동/좌표] (거리 제한 없음)\n" \
+                 "아이템 사용: [물약이름/아이디] (ex [위겐웰드 물약/아이디], 소지품에 있을경우)\n" \
+                 "입력 대기: 5분\n" \
+                 "───────────────────"
+
+  response, new_time = post_session_thread(session, announcement, last_post_time)
+  if response && response['id'] && !response['partial']
+    session.announced = true
+    session.phase = :battle
+    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 안내 송출"
+  else
+    session.announced = false
+    session.phase = :announcing
+    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 안내 송출 실패#{response && response['partial'] ? ' (부분 게시)' : ''}"
+  end
+  new_time
+end
+
+def find_session_for_action(sessions, username, status = nil)
+  username = username.to_s.gsub('@', '').strip
+  active = sessions.values.select { |s| s.active && s.includes_runner?(username) }
+  return nil if active.empty?
+
+  if status
+    related = active.find { |s| s.related_to_status?(status) }
+    return related if related
+  end
+
+  active.max_by { |s| s.start_time }
+end
+
+def process_action_for_session(session, username, text, processed_set, processed_id, runner_sheet, view_sheet, listener, processed_action_status_ids = nil, status_id = nil)
+  status_id ||= processed_id
+  if processed_action_status_ids && processed_action_status_ids.include?(status_id.to_s)
+    processed_set.add(processed_id)
+    return false
+  end
+
+  before = session.actions.size
+
+  record_battle_action(
+    username,
+    text,
+    session.actions,
+    session.processed_messages,
+    processed_set,
+    processed_id,
+    session.runner_names,
+    view_sheet,
+    runner_sheet,
+    session.creature,
+    listener,
+    session.passive_ctx
+  )
+
+  changed = session.actions.size > before
+  processed_action_status_ids.add(status_id.to_s) if processed_action_status_ids
+  changed
+end
+
+def award_victory_credits!(session, scout_sheet, last_post_time)
+  return last_post_time unless scout_sheet
+
+  representative = session.runner_names.first
+  return last_post_time unless representative
+
+  reward = session.creature[:reward].to_i
+
+  creature_name = session.creature[:name].to_s.strip
+  creature_name = '크리쳐' if creature_name.empty?
+
+  lines = []
+
+  if reward > 0
+    lines << "[보상] #{creature_name} 처치 — 크레딧 +#{reward}"
+    session.runner_names.each do |acct|
+      new_total = ScoutDirections.add_credits(scout_sheet, acct, reward)
+      lines << if new_total
+                 "@#{acct} 보유 크레딧: #{new_total}"
+               else
+                 "@#{acct} 크레딧 지급 실패 (조사봇 계정 정보를 찾을 수 없음)"
+               end
+    end
+  end
+
+  # 현상금 사냥: 걸린 판돈의 2배를 참여자에게 1/n씩 지급한다.
+  if session.bounty_pot.to_i > 0
+    bounty_reward_per_person = session.bounty_per_person.to_i * 2
+    lines << "[현상금 달성] 판돈 #{session.bounty_pot}크레딧 → 2배 정산"
+    session.runner_names.each do |acct|
+      new_total = ScoutDirections.add_credits(scout_sheet, acct, bounty_reward_per_person)
+      lines << if new_total
+                 "@#{acct} 현상금 +#{bounty_reward_per_person} (보유: #{new_total})"
+               else
+                 "@#{acct} 현상금 지급 실패 (조사봇 계정 정보를 찾을 수 없음)"
+               end
+    end
+  end
+
+  return last_post_time if lines.empty?
+
+  begin
+    response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n#{lines.join("\n")}", last_post_time)
+    new_time
+  rescue => e
+    puts "[전투봇] [세션 #{session.id}] 처치 보상 안내 실패: #{e.class}: #{e.message}"
+    last_post_time
+  end
+rescue => e
+  puts "[전투봇] [세션 #{session.id}] 처치 보상 지급 실패: #{e.class}: #{e.message}"
+  last_post_time
+end
+
+def confiscate_defeat_credits!(session, scout_sheet, last_post_time)
+  return last_post_time unless scout_sheet
+  creature_name = session.creature[:name].to_s.strip
+  creature_name = '크리쳐' if creature_name.empty?
+  # 2026-08-13 사양 변경: 패배 시 크레딧 압수 제거. 대신 조사상태 위치를
+  # 비워 초기화한다 ("복귀") — 이후 [탐사]/[조사]는 위치 정보가 없어
+  # 자연히 막히고, 다시 [탐험] 또는 [위치/장소명]으로만 진행할 수 있다.
+  # 전투불능 플래그(최근행동='전투불능')도 함께 남겨 위치/조사 명령에서
+  # 명확한 안내 문구를 띄운다.
+  lines = ["[패배] #{creature_name}에게 전인원 전투 불능"]
+  lines << "탐험 및 조사를 중지합니다."
+  if session.bounty_pot.to_i > 0
+    lines << "[현상금 실패] 걸었던 판돈 #{session.bounty_pot}크레딧이 소멸했습니다."
+  end
+  session.runner_names.each do |acct|
+    ScoutDirections.mark_incapacitated!(scout_sheet, acct)
+    ScoutDirections.clear_location!(scout_sheet, acct)
+  end
+  begin
+    response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n#{lines.join("\n")}", last_post_time)
+    new_time
+  rescue => e
+    puts "[전투봇] [세션 #{session.id}] 패배 안내 실패: #{e.class}: #{e.message}"
+    last_post_time
+  end
+rescue => e
+  puts "[전투봇] [세션 #{session.id}] 패배 처리 실패: #{e.class}: #{e.message}"
+  last_post_time
+end
+
+def announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
+  return last_post_time unless scout_sheet
+
+  # 전투 참가자 전원이 같은 격자 칸에서 조우했다고 보고, 대표 계정 하나의
+  # 좌표로 방향을 계산한 뒤 파티 전체에게 한 번에 안내한다.
+  # (개인별로 따로 안내하면 각자 다른 방향으로 흩어질 수 있어 파티 단위로 통일)
+  representative = session.runner_names.first
+  return last_post_time unless representative
+
+  # 레이드 단독 전투(격자 조사와 무관)에는 방향 안내를 하지 않는다.
+
+  directions_text = ScoutDirections.build_location_announcement(scout_sheet, scout_grid_sheet, representative)
+  return last_post_time unless directions_text
+
+  text = "#{session.runner_tags}\n\n#{directions_text}"
+
+  begin
+    response, new_time = post_session_thread(session, text, last_post_time)
+    new_time
+  rescue => e
+    puts "[전투봇] [세션 #{session.id}] 조사맵 방향 안내 실패: #{e.class}: #{e.message}"
+    last_post_time
+  end
+rescue => e
+  puts "[전투봇] [세션 #{session.id}] 조사맵 방향 안내 실패: #{e.class}: #{e.message}"
+  last_post_time
+end
+
+def announce_manual_battle_end!(target, scout_sheet, scout_grid_sheet, last_post_time)
+  response, new_time = post_session_thread(target, "#{target.runner_tags}\n\n[전투 중단]", last_post_time)
+  last_post_time = new_time
+
+  last_post_time = announce_scout_directions!(target, scout_sheet, scout_grid_sheet, last_post_time)
+
+  if scout_sheet
+    begin
+      target.runner_names.each { |acct| ScoutDirections.clear_battle_flag!(scout_sheet, acct) }
+    rescue => e
+      puts "[전투봇] [세션 #{target.id}] 조사봇 전투 플래그 해제 실패: #{e.class}: #{e.message}"
+    end
+  end
+
+  last_post_time
+end
+
+# 라운드 정산 결과 안내가 전부 게시될 때까지 재시도한다.
+# (부분 게시/게시 실패 시 라운드가 소리 없이 그냥 넘어가던 문제 수정)
+def flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet, last_post_time)
+  ctx = session.passive_ctx
+  pending = ctx[:pending_result]
+  return [last_post_time, false] unless pending
+
+  while pending[:parts].any?
+    part = pending[:parts].first
+    response, new_time = post_session_thread(session, part, last_post_time)
+    last_post_time = new_time
+
+    if response && response['id'] && !response['partial']
+      pending[:parts].shift
+    else
+      puts "[전투봇] [세션 #{session.id}] #{pending[:round]}라운드 결과 안내 미발송 (남은 #{pending[:parts].size}개) — 재시도 예정"
+      return [last_post_time, false]
+    end
+  end
+
+  ctx.delete(:pending_result)
+  session.mark_dead_runners(pending[:dead])
+
+  if pending[:escaped]
+    session.active = false
+    session.auto_next_round_timer = nil
+    session.awaiting_boss = false
+    puts "[전투봇] [세션 #{session.id}] 전투 이탈 성공"
+    sheet_log(creature_sheet, session.id, pending[:round], '전투 이탈', '이탈 성공')
+
+    last_post_time = announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
+
+    if scout_sheet
+      begin
+        session.runner_names.each { |acct| ScoutDirections.clear_battle_flag!(scout_sheet, acct) }
+      rescue => e
+        puts "[전투봇] [세션 #{session.id}] 조사봇 전투 플래그 해제 실패: #{e.class}: #{e.message}"
+      end
+    end
+
+    return [last_post_time, true]
+  end
+
+  if pending[:creature_dead] || pending[:all_runners_dead]
+    session.active = false
+    session.auto_next_round_timer = nil
+    session.awaiting_boss = false
+    puts "[전투봇] [세션 #{session.id}] 전투 종결 (#{pending[:creature_dead] ? '승리' : '패배'})"
+    sheet_log(creature_sheet, session.id, pending[:round], '전투 종결', pending[:creature_dead] ? '크리쳐 격파 - 승리' : '전원 전투 불가 - 패배')
+
+    if pending[:creature_dead]
+      last_post_time = award_victory_credits!(session, scout_sheet, last_post_time)
+    else
+      last_post_time = confiscate_defeat_credits!(session, scout_sheet, last_post_time)
+    end
+
+    last_post_time = announce_scout_directions!(session, scout_sheet, scout_grid_sheet, last_post_time)
+
+    if scout_sheet
+      begin
+        if pending[:creature_dead]
+          session.runner_names.each { |acct| ScoutDirections.clear_battle_flag!(scout_sheet, acct) }
+        else
+          session.runner_names.each { |acct| ScoutDirections.end_scout!(scout_sheet, acct) }
+        end
+      rescue => e
+        puts "[전투봇] [세션 #{session.id}] 조사봇 상태 갱신 실패: #{e.class}: #{e.message}"
+      end
+    end
+
+    [last_post_time, true]
+  else
+    session.round += 1
+    session.phase = :boss_command
+    session.awaiting_boss = true
+    session.announced = false
+    session.actions = {}
+    session.processed_messages = {}
+    session.start_time = Time.now
+    session.auto_next_round_timer = nil
+    # 필사즉생 과잉피해 잠금은 정확히 1라운드만 적용되어야 한다. 플레이어가
+    # 아무 메시지도 보내지 않고 라운드가 타임아웃되면 record_battle_action의
+    # 소비 로직을 못 거치므로 잠금이 계속 이월되는 문제가 있었다. 새 라운드
+    # 시작 시점에 무조건 자동으로 "행동불가" 처리하고 잠금을 해제해 이월을 막는다.
+    if ctx && ctx[:action_locked] && ctx[:action_locked].any?
+      puts "[전투봇] [세션 #{session.id}] action_locked 강제소비 실행 → #{ctx[:action_locked].keys.join(', ')} (#{session.round}라운드)"
+      ctx[:action_locked].keys.each do |locked_name|
+        session.actions[locked_name] = { type: '행동불가', target: '' }
+        session.processed_messages[locked_name] = true
+      end
+      ctx[:action_locked] = {}
+    end
+
+    if session.auto_mode
+      # '현재스킬'이 채워져 있으면 자동 모드여도 무작위 선택 대신 그 값을
+      # 그대로 고정 사용한다. 세션 시작 시 캐시된 값이 아니라 매 라운드
+      # 시트에서 새로 읽어, 전투 도중 운영진이 값을 바꾸면 다음 라운드부터
+      # 바로 반영되도록 한다.
+      fresh_creature = creature_from_stats_sheet_by_name(creature_sheet, session.creature[:name])
+      fixed_skill = fresh_creature ? fresh_creature[:current_skill].to_s.strip : ''
+      auto_skill = fixed_skill.empty? ? select_auto_skill(session.creature, creature_sheet, session.passive_ctx) : fixed_skill
+      if auto_skill
+        session.passive_ctx[:boss_override] = { skill: auto_skill }
+        session.awaiting_boss = false
+        session.phase = :announcing
+      end
+    end
+
+    puts "[전투봇] [세션 #{session.id}] #{pending[:round]}라운드 정산 완료 - #{session.round}라운드 보스행동커맨드 대기"
+    [last_post_time, false]
+  end
+end
+
+def settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, last_post_time, scout_sheet = nil, scout_grid_sheet = nil)
+  return [last_post_time, false] unless session.active
+
+  ctx = session.passive_ctx
+
+  # 이전 라운드 결과 안내가 아직 완전히 게시되지 못했다면, 새 라운드를
+  # 정산하기 전에 먼저 그 결과부터 끝까지 게시되도록 재시도한다.
+  if ctx[:pending_result]
+    return flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet, last_post_time)
+  end
+
+  return [last_post_time, false] unless session.phase == :battle
+
+  required = session.required_actions
+  round_done = required > 0 && session.actions.size >= required
+  round_timeout = (Time.now - session.start_time) >= ACTION_WAIT_SECONDS
+  return [last_post_time, false] unless round_done || round_timeout
+
+  session.passive_ctx[:round] = session.round.to_i
+  begin
+    log, runner_state = settle_round(
+      session.actions,
+      session.runner_names,
+      runner_sheet,
+      creature_sheet,
+      view_sheet,
+      session.creature,
+      session.passive_ctx
+    )
+  rescue => e
+    puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 정산 실패: #{e.class}: #{e.message}"
+    puts e.backtrace.first(5)
+    sheet_log(creature_sheet, session.id, session.round, '정산 실패',
+              "#{e.class}: #{e.message}\n#{Array(e.backtrace).first(5).join("\n")}\n보스행동커맨드 입력 시 다음 라운드로 진행됩니다.")
+    session.round += 1
+    session.phase = :boss_command
+    session.awaiting_boss = true
+    session.announced = false
+    session.actions = {}
+    session.processed_messages = {}
+    session.start_time = Time.now
+    session.auto_next_round_timer = nil
+    # 필사즉생 과잉피해 잠금은 정확히 1라운드만 적용되어야 한다. 플레이어가
+    # 아무 메시지도 보내지 않고 라운드가 타임아웃되면 record_battle_action의
+    # 소비 로직을 못 거치므로 잠금이 계속 이월되는 문제가 있었다. 새 라운드
+    # 시작 시점에 무조건 자동으로 "행동불가" 처리하고 잠금을 해제해 이월을 막는다.
+    if ctx && ctx[:action_locked] && ctx[:action_locked].any?
+      puts "[전투봇] [세션 #{session.id}] action_locked 강제소비 실행 → #{ctx[:action_locked].keys.join(', ')} (#{session.round}라운드)"
+      ctx[:action_locked].keys.each do |locked_name|
+        session.actions[locked_name] = { type: '행동불가', target: '' }
+        session.processed_messages[locked_name] = true
+      end
+      ctx[:action_locked] = {}
+    end
+    begin
+      response, new_time = post_session_thread(session, "#{session.runner_tags}\n\n[안내] 라운드 정산 중 오류가 발생했습니다. 운영 계정이 보스 행동을 입력하면 다음 라운드로 진행됩니다.", last_post_time)
+      last_post_time = new_time
+    rescue => post_err
+      puts "[전투봇] [세션 #{session.id}] 정산 실패 안내 송출 실패: #{post_err.class}: #{post_err.message}"
+    end
+    return [last_post_time, false]
+  end
+
+  WebState.update_runners(session, runner_state)
+  BattleItems.consume_all!(ctx)
+
+  if ctx[:escaped_by]
+    escaped_name = ctx.delete(:escaped_by)
+    escaped_state = runner_state.find { |r| r[:name].to_s == escaped_name.to_s }
+    escaped_label = escaped_state && !escaped_state[:display_name].to_s.strip.empty? ? escaped_state[:display_name] : escaped_name
+    escape_text = "#{session.runner_tags}\n\n[#{session.round}라운드] 전투 이탈\n\n#{Array(log).join("\n")}\n\n#{escaped_label}의 이탈 성공 — 전투에서 벗어났습니다."
+    sheet_log(creature_sheet, session.id, session.round, '이탈 성공', "#{escaped_label} 이탈 성공\n\n#{Array(log).join("\n")}")
+    ctx[:pending_result] = {
+      parts: [escape_text],
+      round: session.round,
+      dead: [],
+      creature_dead: false,
+      all_runners_dead: false,
+      escaped: true
+    }
+    session.phase = :settling
+    return flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet, last_post_time)
+  end
+
+  result = build_result_text(
+    session.runner_tags,
+    session.round,
+    session.creature,
+    session.actions,
+    session.runner_names,
+    log,
+    runner_state,
+    view_sheet,
+    timeout: round_timeout && !round_done
+  )
+
+  dead = runner_state.select { |r| session.runner_names.include?(r[:name].to_s) && r[:hp].to_i <= 0 }.map { |r| r[:name].to_s }
+  creature_dead = session.creature[:hp].to_i <= 0
+  all_runners_dead = runner_state.none? { |r| session.runner_names.include?(r[:name]) && r[:hp].to_i > 0 }
+
+  actions_text = session.actions.map { |name, act| "#{name}: [#{act[:type]}/#{act[:target]}]" }.join(' / ')
+  sheet_log(creature_sheet, session.id, session.round, '정산',
+            "행동: #{actions_text.empty? ? '없음' : actions_text}\n\n#{Array(log).join("\n")}")
+
+  # 정산은 끝났지만 결과 안내는 전부 게시될 때까지 확정하지 않는다.
+  # (게시 실패/부분 게시 시에도 라운드가 그냥 넘어가던 문제 수정)
+  ctx[:pending_result] = {
+    parts: Array(result),
+    round: session.round,
+    dead: dead,
+    creature_dead: creature_dead,
+    all_runners_dead: all_runners_dead
+  }
+  session.phase = :settling
+
+  flush_pending_result!(session, scout_sheet, scout_grid_sheet, creature_sheet, last_post_time)
+end
+
+CREATURE_COOLDOWN_KEY = '__creature__'.freeze
+
+# 보스스킬 탭(A=스킬명, D=쿨타임)에서, 매 라운드 "지금 쿨타임이 돌아온
+# 스킬" 전부를 후보로 모아 그중 무작위로 하나를 선택한다. 시트에 적힌
+# 순서는 참고하지 않는다. 선택된 스킬의 쿨타임은 여기서 세팅하지 않고,
+# 실제로 정산 단계에서 지원/방어 스킬로 실행될 때 cooldown_gate!가 러너와
+# 동일한 방식으로 세팅한다. 전부 쿨타임 중이면 어쩔 수 없이 전체 목록에서
+# 무작위로 선택한다(빈 라운드 방지).
+def select_auto_skill(creature, creature_sheet, ctx = nil)
+  return nil unless creature && creature_sheet
+  begin
+    rows = boss_skill_rows(creature_sheet)
+    all_skills = rows.map { |r| [r[0].to_s.strip, r[3].to_s.strip.to_i] }.reject { |name, _| name.empty? }
+    return nil if all_skills.empty?
+
+    if ctx.is_a?(Hash)
+      cooldowns = (ctx[:cooldowns] ||= Hash.new { |h, k| h[k] = {} })[CREATURE_COOLDOWN_KEY]
+      # 시트에 적힌 순서는 무시하고, 매 라운드 "지금 쿨타임이 돌아온 스킬"
+      # 전부를 후보로 모아서 그중 무작위로 하나를 뽑는다. 전부 쿨타임 중이면
+      # 어쩔 수 없이 전체 목록에서 무작위로 뽑는다(빈 라운드 방지).
+      # 쿨타임 세팅 자체는 여기서 하지 않는다 — 실제로 이 스킬이 정산
+      # 단계에서 지원/방어 스킬로 실행될 때 cooldown_gate!가 러너와 동일한
+      # 방식으로 세팅한다.
+      ready = all_skills.reject { |name, _| cooldowns[name].to_i > 0 }
+      ready = all_skills if ready.empty?
+      ready.sample.first
+    else
+      all_skills.sample.first
+    end
+  rescue => e
+    puts "[select_auto_skill 오류] #{e.class}: #{e.message}"
+    nil
+  end
+end
+
+require_relative 'duel_manager' if ENV['DUEL_ENABLED'].to_s.strip.downcase == 'true'
+fetch_public_statuses.each { |s| processed_statuses.add(s['id']) if s['id'] }
+snapshot_current_dm_ids(processed_dm_ids)
+snapshot_current_notification_ids(processed_notification_ids)
+puts '[전투봇] 기존 툿/DM/멘션 스냅샷 완료 (재발동 방지)'
+
+bot_on = false
+last_trigger_check = Time.at(0)
+WebServer.start!
+
+loop do
+  begin
+    if (Time.now - last_trigger_check) >= TRIGGER_CHECK_INTERVAL
+      new_bot_on = $trigger_sheet.read_bot_on_or_nil
+      new_bot_on = bot_on if new_bot_on.nil?
+      last_trigger_check = Time.now
+
+      if new_bot_on && !bot_on
+        fetch_public_statuses.each { |s| processed_statuses.add(s['id']) if s['id'] }
+        snapshot_current_dm_ids(processed_dm_ids)
+        snapshot_current_notification_ids(processed_notification_ids)
+        puts '[전투봇] 전투봇 켜짐 (실행 탭 A2 체크)'
+      elsif !new_bot_on && bot_on
+        puts '[전투봇] 전투봇 꺼짐 (실행 탭 A2 해제)'
+      end
+
+      bot_on = new_bot_on
+    end
+
+    unless bot_on
+      sleep(3)
+      next
+    end
+
+    sessions.values.each { |session| check_prep_completion(session, creature_sheet) }
+    WebState.sync_sessions(sessions)
+    DUEL_MANAGER.tick(runner_sheet: runner_sheet,
+                      view_sheet: (defined?(view_sheet) ? view_sheet : nil),
+                      scout_sheet: (defined?(scout_sheet) ? scout_sheet : nil)) if defined?(DUEL_MANAGER)
+
+    sessions.values.each do |session|
+      next unless session.auto_next_round_timer
+      next unless (Time.now - session.auto_next_round_timer) >= ROUND_WAIT_SECONDS
+
+      session.reset_for_next_round!
+      snapshot_current_dm_ids(processed_dm_ids)
+      snapshot_current_notification_ids(processed_notification_ids)
+      puts "[전투봇] [세션 #{session.id}] #{session.round}라운드 자동 시작"
+    end
+
+    conversations = fetch_conversations
+
+    conversations.each do |conv|
+      last_status = conv['last_status']
+      next unless last_status
+
+      sender = last_status['account'] || conv['accounts'].to_a.first
+      next unless sender
+
+      dm_id = last_status['id']
+      next if processed_dm_ids.include?(dm_id)
+
+      username = sender['username'].to_s.gsub('@', '').strip
+      content = clean_html(last_status['content'])
+
+      if cache_reset_text?(content)
+        unless cache_reset_once?(last_status['id'])
+          processed_dm_ids.add(dm_id)
+          next
+        end
+        $boss_skill_cache = nil
+        puts "[전투봇] 보스스킬 캐시 초기화 (DM, @#{username})"
+        post_battle_thread("@#{username} 보스스킬 캐시를 초기화했습니다. 다음 조회부터 시트 최신값을 사용합니다.", true, last_status['id'])
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      if battle_start_text?(content)
+        if sessions.key?(last_status['id'])
+          processed_dm_ids.add(dm_id)
+          next
+        end
+        session = create_battle_session_from_status(last_status, content, :dm, creature_sheet, BOT_USERNAME, username)
+        if session
+          ok, shortfalls, per_person = apply_bounty_pot!(session, scout_sheet, creature_sheet)
+          if ok == :already_participated
+            listener.send_dm(username, "[현상금] 오늘 이미 참여한 사람이 있어 시작할 수 없습니다 (1인 1일 1회): #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+          elsif ok == false
+            listener.send_dm(username, "[현상금] 판돈이 부족한 참여자가 있어 시작할 수 없습니다. 1인당 필요 크레딧: #{per_person} / 부족: #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+          else
+            sessions[session.id] = session
+            auto_enabled = $trigger_sheet.read_auto_mode
+            session.auto_mode = auto_enabled if auto_enabled
+            puts "[전투봇] [세션 #{session.id}] DM 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
+            sheet_log(creature_sheet, session.id, session.round, '전투 시작', "DM / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
+          end
+        end
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      if battle_end_text?(content)
+        end_sid = last_status['id'].to_s
+
+        if handled_battle_end_status_ids.include?(end_sid)
+          processed_dm_ids.add(dm_id)
+          next
+        end
+
+        target = find_session_for_action(sessions, username, last_status)
+        if target.nil?
+          # 발신자가 실제로 참여 중인 세션만 자동 매칭한다.
+          # (활성 세션이 우연히 1개뿐이라는 이유로 무관한 세션을 종료시키던
+          #  폴백은 제거 — 다른 팀 전투가 함께 끝나는 사고의 원인이었다.)
+          runner_sessions = sessions.values.select { |s| s.active && s.includes_runner?(username) }
+          target = runner_sessions.first if runner_sessions.length == 1
+        end
+
+        if target
+          target.active = false
+          target.auto_next_round_timer = nil
+          handled_battle_end_status_ids.add(end_sid)
+          last_post_time = announce_manual_battle_end!(target, scout_sheet, scout_grid_sheet, last_post_time)
+          puts "[전투봇] [세션 #{target.id}] DM 전투 중단"
+          sheet_log(creature_sheet, target.id, target.round, '전투 중단', "@#{username} 의 종료 명령")
+        else
+          puts "[전투봇] DM 종료 명령 무시: 연결 세션 불명확 @#{username}"
+          sheet_log(creature_sheet, '-', '-', '전투 종료 명령 무시', "@#{username} / DM 연결 세션 불명확 / status=#{end_sid}")
+        end
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      if defined?(DUEL_MANAGER) &&
+         DUEL_MANAGER.handle_message(username: username, text: content, status: last_status,
+                                     sessions: sessions, runner_sheet: runner_sheet, bot_username: BOT_USERNAME)
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      boss_sid = last_status['id'].to_s
+      if handled_boss_status_ids.include?(boss_sid)
+        processed_dm_ids.add(dm_id)
+        next
+      end
+      handled_boss_status_ids.add(boss_sid)
+      case try_boss_command!(sessions, username, last_status, content, creature_sheet, quiet_hold: held_boss_logged_ids.include?(boss_sid))
+      when :applied, :ignored
+        processed_dm_ids.add(dm_id)
+        next
+      when :hold
+        handled_boss_status_ids.delete(boss_sid)
+        held_boss_logged_ids.add(boss_sid)
+        next
+      end
+      handled_boss_status_ids.delete(boss_sid)
+
+      if bot_status?(last_status, BOT_USERNAME)
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      session = find_session_for_action(sessions, username, last_status)
+      unless session
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      if session.phase == :prep
+        handle_prep_input(session, username, content, processed_dm_ids, dm_id, listener, processed_action_status_ids, last_status['id'])
+        next
+      end
+
+      unless session.phase == :battle
+        processed_dm_ids.add(dm_id)
+        next
+      end
+
+      process_action_for_session(session, username, content, processed_dm_ids, dm_id, runner_sheet, view_sheet, listener, processed_action_status_ids, dm_id)
+    end
+
+    fetch_public_statuses.each do |status|
+      status_id = status['id']
+      next if processed_statuses.include?(status_id)
+
+      content = clean_html(status['content'])
+
+      if cache_reset_text?(content)
+        unless cache_reset_once?(status_id)
+          processed_statuses.add(status_id)
+          next
+        end
+        $boss_skill_cache = nil
+        pub_username = status.dig('account', 'username').to_s
+        puts "[전투봇] 보스스킬 캐시 초기화 (공개, @#{pub_username})"
+        post_battle_thread("@#{pub_username} 보스스킬 캐시를 초기화했습니다. 다음 조회부터 시트 최신값을 사용합니다.", false, status_id)
+        processed_statuses.add(status_id)
+        next
+      end
+
+      if battle_start_text?(content)
+        if sessions.key?(status_id)
+          processed_statuses.add(status_id)
+          next
+        end
+        starter_name = status.dig('account', 'username').to_s.strip
+        bot_mentioned = status['mentions'].to_a.any? { |m| (m['username'] || m['acct']).to_s.split('@').first.to_s.casecmp?(BOT_USERNAME.to_s) }
+        session = create_battle_session_from_status(status, content, :public, creature_sheet, BOT_USERNAME, bot_mentioned ? starter_name : nil)
+        if session
+          ok, shortfalls, per_person = apply_bounty_pot!(session, scout_sheet, creature_sheet)
+          if ok == :already_participated
+            battle_notice(status, "[현상금] 오늘 이미 참여한 사람이 있어 시작할 수 없습니다 (1인 1일 1회): #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+          elsif ok == false
+            battle_notice(status, "[현상금] 판돈이 부족한 참여자가 있어 시작할 수 없습니다. 1인당 필요 크레딧: #{per_person} / 부족: #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+          else
+            sessions[session.id] = session
+            auto_enabled = $trigger_sheet.read_auto_mode
+            session.auto_mode = auto_enabled if auto_enabled
+            puts "[전투봇] [세션 #{session.id}] 공개 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
+            sheet_log(creature_sheet, session.id, session.round, '전투 시작', "공개 / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
+          end
+        elsif !status['__rejected']
+          battle_notice(status, '[전투 오류] 참여자가 없습니다. 태그를 추가하세요.')
+          puts '[전투봇] 태그된 러너 없음'
+        end
+        processed_statuses.add(status_id)
+        next
+      end
+
+      pub_sender = status.dig('account', 'username').to_s
+      boss_sid = status_id.to_s
+      if handled_boss_status_ids.include?(boss_sid)
+        processed_statuses.add(status_id)
+        next
+      end
+      handled_boss_status_ids.add(boss_sid)
+      case try_boss_command!(sessions, pub_sender, status, content, creature_sheet, quiet_hold: held_boss_logged_ids.include?(boss_sid))
+      when :applied, :ignored
+        processed_statuses.add(status_id)
+        next
+      when :hold
+        handled_boss_status_ids.delete(boss_sid)
+        held_boss_logged_ids.add(boss_sid)
+        next
+      end
+      handled_boss_status_ids.delete(boss_sid)
+
+      if battle_end_text?(content)
+        end_sid = status_id.to_s
+
+        if handled_battle_end_status_ids.include?(end_sid)
+          processed_statuses.add(status_id)
+          next
+        end
+
+        active_sessions = sessions.values.select(&:active)
+        target = active_sessions.find { |s| s.related_to_status?(status) }
+
+        # 타래로 특정되지 않으면 발신자가 참여 중인 세션만 자동 매칭한다.
+        # (활성 세션이 1개뿐이라는 이유만으로 무관한 세션을 종료시키지 않는다.)
+        if target.nil?
+          runner_sessions = active_sessions.select { |s| s.includes_runner?(pub_sender) }
+          target = runner_sessions.first if runner_sessions.length == 1
+        end
+
+        if target
+          target.active = false
+          target.auto_next_round_timer = nil
+          target.awaiting_boss = false
+          handled_battle_end_status_ids.add(end_sid)
+
+          last_post_time = announce_manual_battle_end!(target, scout_sheet, scout_grid_sheet, last_post_time)
+          puts "[전투봇] [세션 #{target.id}] 공개 전투 중단"
+          sheet_log(
+            creature_sheet,
+            target.id,
+            target.round,
+            '전투 중단',
+            "공개 툿 종료 명령 / status=#{end_sid}"
+          )
+        else
+          puts "[전투봇] 공개 종료 명령 무시: 연결 세션 불명확 status=#{end_sid}"
+          sheet_log(
+            creature_sheet,
+            '-',
+            '-',
+            '전투 종료 명령 무시',
+            "공개 종료 명령의 연결 세션 불명확 / status=#{end_sid}"
+          )
+        end
+      end
+
+      processed_statuses.add(status_id)
+    end
+
+    sessions.values.select(&:active).each do |session|
+      if session.phase == :prep && !session.announced
+        last_post_time = announce_prep_round(session, view_sheet, runner_sheet, last_post_time, sessions: sessions)
+      elsif session.phase == :announcing
+        last_post_time = announce_round(session, view_sheet, creature_sheet, runner_sheet, last_post_time)
+      elsif session.phase == :boss_command && !session.announced
+        last_post_time = announce_boss_turn(session, view_sheet, runner_sheet, last_post_time)
+      end
+    end
+
+    fetch_notifications.each do |notification|
+      notification_id = notification['id']
+      next if processed_notification_ids.include?(notification_id)
+
+      status = notification['status']
+      unless status
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      if defined?(DUEL_MANAGER) &&
+         DUEL_MANAGER.handle_message(username: notification.dig('account', 'username').to_s,
+                                     text: clean_html(status['content']), status: status,
+                                     sessions: sessions, runner_sheet: runner_sheet, bot_username: BOT_USERNAME)
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      if bot_status?(status, BOT_USERNAME)
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      # DM(visibility: direct)으로 온 멘션 알림은 대화(conversations) 경로에서 이미
+      # 처리되므로, 여기서 중복 처리하지 않도록 건너뛴다.
+      if status['visibility'].to_s == 'direct'
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      username = notification.dig('account', 'username').to_s.gsub('@', '').strip
+      text = clean_html(status['content'])
+
+      boss_sid = status['id'].to_s
+      if handled_boss_status_ids.include?(boss_sid)
+        processed_notification_ids.add(notification_id)
+        next
+      end
+      handled_boss_status_ids.add(boss_sid)
+      case try_boss_command!(sessions, username, status, text, creature_sheet, quiet_hold: held_boss_logged_ids.include?(boss_sid))
+      when :applied, :ignored
+        processed_notification_ids.add(notification_id)
+        next
+      when :hold
+        handled_boss_status_ids.delete(boss_sid)
+        held_boss_logged_ids.add(boss_sid)
+        next
+      end
+      handled_boss_status_ids.delete(boss_sid)
+
+      if cache_reset_text?(text)
+        unless cache_reset_once?(status['id'])
+          processed_notification_ids.add(notification_id)
+          next
+        end
+        $boss_skill_cache = nil
+        puts "[전투봇] 보스스킬 캐시 초기화 (멘션, @#{username})"
+        post_battle_thread("@#{username} 보스스킬 캐시를 초기화했습니다. 다음 조회부터 시트 최신값을 사용합니다.", false, status['id'])
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      if battle_start_text?(text)
+        if sessions.key?(status['id'])
+          processed_notification_ids.add(notification_id)
+          next
+        end
+        session = create_battle_session_from_status(status, text, :mention, creature_sheet, BOT_USERNAME, username)
+        if session
+          ok, shortfalls, per_person = apply_bounty_pot!(session, scout_sheet, creature_sheet)
+          if ok == :already_participated
+            battle_notice(status, "[현상금] 오늘 이미 참여한 사람이 있어 시작할 수 없습니다 (1인 1일 1회): #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+          elsif ok == false
+            battle_notice(status, "[현상금] 판돈이 부족한 참여자가 있어 시작할 수 없습니다. 1인당 필요 크레딧: #{per_person} / 부족: #{Array(shortfalls).map { |a| "@#{a}" }.join(', ')}")
+          else
+            sessions[session.id] = session
+            processed_statuses.add(status['id'])
+            auto_enabled = $trigger_sheet.read_auto_mode
+            session.auto_mode = auto_enabled if auto_enabled
+            puts "[전투봇] [세션 #{session.id}] 멘션 전투 시작 - 참여자 #{session.runner_names.join(', ')}, 상대: #{session.creature[:name]} @#{session.creature[:pos]}"
+            sheet_log(creature_sheet, session.id, session.round, '전투 시작', "멘션 / 참여자: #{session.runner_names.join(', ')} / 상대: #{session.creature[:name]} @#{session.creature[:pos]}")
+          end
+        else
+          puts "[전투봇] 멘션 전투시작 실패: 참여자 없음 또는 파싱 실패 (@#{username})"
+        end
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      if battle_end_text?(text)
+        end_sid = status['id'].to_s
+
+        if handled_battle_end_status_ids.include?(end_sid)
+          processed_notification_ids.add(notification_id)
+          processed_statuses.add(status['id']) if status['id']
+          next
+        end
+
+        active_sessions = sessions.values.select(&:active)
+
+        target = active_sessions.find { |s| s.related_to_status?(status) }
+
+        if target.nil?
+          runner_sessions = active_sessions.select do |session|
+            session.includes_runner?(username)
+          end
+
+          target = runner_sessions.first if runner_sessions.length == 1
+        end
+
+        if target
+          target.active = false
+          target.auto_next_round_timer = nil
+          target.awaiting_boss = false
+          handled_battle_end_status_ids.add(end_sid)
+
+          last_post_time = announce_manual_battle_end!(target, scout_sheet, scout_grid_sheet, last_post_time)
+
+          puts "[전투봇] [세션 #{target.id}] 멘션 전투 중단 / status=#{end_sid}"
+          sheet_log(
+            creature_sheet,
+            target.id,
+            target.round,
+            '전투 중단',
+            "@#{username} 의 종료 명령 / status=#{end_sid}"
+          )
+        else
+          puts "[전투봇] 멘션 종료 명령 무시: 연결 세션 불명확 @#{username} status=#{end_sid}"
+          sheet_log(
+            creature_sheet,
+            '-',
+            '-',
+            '전투 종료 명령 무시',
+            "@#{username} / 연결 세션 불명확 / status=#{end_sid}"
+          )
+        end
+
+        processed_statuses.add(status['id']) if status['id']
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      session = find_session_for_action(sessions, username, status)
+      unless session
+        puts "[전투봇] 멘션 무시: 참여 중인 활성 세션 없음 @#{username}"
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      if session.phase == :prep
+        handle_prep_input(session, username, text, processed_notification_ids, notification_id, listener, processed_action_status_ids, status['id'])
+        next
+      end
+
+      unless session.phase == :battle
+        processed_notification_ids.add(notification_id)
+        next
+      end
+
+      process_action_for_session(session, username, text, processed_notification_ids, notification_id, runner_sheet, view_sheet, listener, processed_action_status_ids, status['id'])
+    end
+
+    sessions.values.each do |session|
+      last_post_time, _ = settle_session_if_needed(session, runner_sheet, creature_sheet, view_sheet, last_post_time, scout_sheet, scout_grid_sheet)
+    end
+
+    sessions.delete_if { |_id, session| session.finished? }
+
+  rescue => e
+    puts "[전투봇 오류] #{e.class}: #{e.message}"
+    puts e.backtrace.first(5)
+    sheet_log(creature_sheet, '-', '-', '오류',
+              "#{e.class}: #{e.message}\n#{Array(e.backtrace).first(5).join("\n")}")
+  end
+
+  sleep(3)
+end

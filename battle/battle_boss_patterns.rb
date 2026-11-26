@@ -1,0 +1,393 @@
+# battle_boss_patterns.rb
+# encoding: UTF-8
+
+module BattleBossPatterns
+  module_function
+
+  def pattern_name(creature)
+    creature[:current_skill].to_s.strip.empty? ? creature[:pattern].to_s.strip : creature[:current_skill].to_s.strip
+  end
+
+  def pattern_cells(creature)
+    BattleGrid.parse_cell_list(
+      creature[:skill_range].to_s.empty? ?
+        (creature[:pattern_cells] || creature[:패턴범위] || creature[:범위]) :
+        creature[:skill_range]
+    )
+  end
+
+  def skill_target(creature)
+    creature[:skill_target].to_s.strip.gsub('@', '')
+  end
+
+  def debuff_name(creature)
+    creature[:debuff].to_s.strip
+  end
+
+  def skill_category(creature)
+    creature[:skill_category].to_s.strip
+  end
+
+  def range_shape(creature)
+    creature[:range_shape].to_s.strip
+  end
+
+  def skill_description(creature)
+    creature[:skill_desc].to_s.strip
+  end
+
+  def pattern_multiplier(creature)
+    value = creature[:pattern_multiplier].to_f
+    value > 0 ? value : 1.0
+  end
+
+  def target_count(creature)
+    value = creature[:target_count].to_i
+    value > 0 ? value : 1
+  end
+
+  def apply_ongoing_debuffs!(log, runner_state, ctx)
+    ctx[:debuffs] ||= Hash.new { |h, k| h[k] = [] }
+
+    runner_state.each do |runner|
+      name = runner[:name]
+      dname = runner[:display_name].to_s.strip
+      dname = name.to_s if dname.empty?
+      next unless runner[:hp].to_i > 0
+
+      active = ctx[:debuffs][name].to_a
+      next if active.empty?
+
+      active.each do |debuff|
+        case debuff[:type]
+        when :poison
+          dmg = debuff[:value].to_i <= 0 ? 5 : debuff[:value].to_i
+          runner[:hp] = [runner[:hp].to_i - dmg, 0].max
+          log << "#{dname}: 독 피해 #{dmg}"
+        end
+        debuff[:turns] = debuff[:turns].to_i - 1
+      end
+
+      ctx[:debuffs][name] = active.reject { |d| d[:turns].to_i <= 0 }
+    end
+  end
+
+  def add_stat_debuff!(ctx, target_name, stat, amount, turns)
+    ctx[:buffs][target_name] << {
+      stat: stat,
+      value: -amount.to_i.abs,
+      turns: turns.to_i <= 0 ? 1 : turns.to_i
+    }
+  end
+
+  def apply_debuff!(log, ctx, target_name, debuff, display_name: nil)
+    return if target_name.to_s.empty? || debuff.to_s.strip.empty?
+
+    dname = display_name.to_s.strip
+    dname = target_name.to_s if dname.empty?
+
+    case debuff.to_s.strip
+    when '독'
+      ctx[:debuffs] ||= Hash.new { |h, k| h[k] = [] }
+      ctx[:debuffs][target_name] << { type: :poison, value: 5, turns: 3 }
+      log << "#{dname}: 독 부여 (3턴)"
+    when '둔화'
+      add_stat_debuff!(ctx, target_name, :agi, 10, 2)
+      log << "#{dname}: 둔화 — 민첩 -10 (2턴)"
+    when '약화'
+      add_stat_debuff!(ctx, target_name, :atk, 10, 2)
+      log << "#{dname}: 약화 — 마법능력 -10 (2턴)"
+    when '취약'
+      add_stat_debuff!(ctx, target_name, :dur, 10, 2)
+      log << "#{dname}: 취약 — 내구도 -10 (2턴)"
+    when '기절'
+      ctx[:stun] ||= {}
+      ctx[:stun][target_name] = 1
+      log << "#{dname}: 기절 — 다음 행동 불가"
+    when '반격'
+      ctx[:counter_debuff] ||= {}
+      ctx[:counter_debuff][target_name] = { multiplier: 2.0 }
+      log << "#{dname}: 반격 부여 — 이후 받는 모든 피해를 2배로 반사합니다."
+    end
+  end
+
+  def pattern_damage(creature, multiplier)
+    formula = creature[:damage_formula].to_s.strip
+    magic = creature[:atk].to_i
+
+    case formula
+    when /고정\s*(\d+)/
+      Regexp.last_match(1).to_i
+    when /마법\s*[x×*]\s*([0-9.]+)/
+      (magic * Regexp.last_match(1).to_f).ceil
+    when /마법능력\s*[x×*]\s*([0-9.]+)/
+      (magic * Regexp.last_match(1).to_f).ceil
+    else
+      base = (magic * multiplier.to_f).ceil
+      base <= 0 ? 0 : base
+    end
+  end
+
+  def range_text(cells)
+    cells.to_a.map(&:to_s).map(&:upcase).reject(&:empty?).join(' · ')
+  end
+
+  def apply_pattern_damage_to_runner!(log, runner, creature, raw_power, debuff, ctx, stats_of:, dur_bonus:, defended_multiplier:, shields:, took_damage:, agi_bonus: nil, runner_state: nil, multi_target: false)
+    name = runner[:name]
+    dname = runner[:display_name].to_s.strip
+    dname = name.to_s if dname.empty?
+
+    redirected = false
+    cover_name = ctx[:cover] ? ctx[:cover][name] : nil
+    if cover_name && runner_state
+      cover_runner = runner_state.find { |r| r[:name].to_s == cover_name.to_s }
+      if cover_runner && cover_runner[:hp].to_i > 0
+        cover_dname = cover_runner[:display_name].to_s.strip
+        cover_dname = cover_name.to_s if cover_dname.empty?
+        log << "#{cover_dname} → [희생] #{dname} 대신 피격"
+        runner = cover_runner
+        name = runner[:name]
+        dname = cover_dname
+        redirected = true
+      end
+    end
+
+    if !redirected && multi_target && ctx[:survive_once] && runner_state
+      # 다인 대상 공격(전체공격/범위공격/지정공격다인)만 필사즉생이 흡수한다.
+      # 회피 판정 없이 무조건 흡수하며, 위력은 즉시 정산하지 않고 버퍼에 모아뒀다가
+      # 라운드 종료 시 유효 내구도를 1번만 적용해 최종 피해를 계산한다.
+      guardian_name = ctx[:survive_once].to_a.find { |_n, active| active }&.first
+      if guardian_name
+        guardian_runner = runner_state.find { |r| r[:name].to_s == guardian_name.to_s }
+        if guardian_runner && guardian_runner[:hp].to_i > 0
+          guardian_dname = guardian_runner[:display_name].to_s.strip
+          guardian_dname = guardian_name.to_s if guardian_dname.empty?
+          ctx[:indomitable_buffer][guardian_name] = ctx[:indomitable_buffer][guardian_name].to_i + raw_power.to_i
+          log << "#{guardian_dname} → [필사즉생] #{dname} 대신 흡수 (판정은 라운드 종료 시 일괄 정산)"
+          log << ''
+          return 0
+        end
+      end
+    end
+
+    stats = stats_of ? stats_of.call(name) : {}
+
+    hit_detail = BattleCalculator.hit_detail(creature[:tec].to_i, base: creature[:hit_base].to_i)
+    log << "명중 #{hit_detail[:rate]}% → #{hit_detail[:roll]} (#{hit_detail[:success] ? '명중' : '빗나감'})"
+    unless hit_detail[:success]
+      log << "#{dname} 회피 — 피해 없음"
+      log << ''
+      return 0
+    end
+
+    # 회피 판정: 보스의 모든 피해 패턴에 자동 적용 (민첩 버프 포함)
+    base_agi = stats[:agi].to_i
+    base_agi = runner[:agi].to_i if base_agi <= 0 && runner[:agi]
+    eff_agi = base_agi + (agi_bonus ? agi_bonus[name].to_i : 0)
+    evade_detail = BattleCalculator.evade_detail(eff_agi)
+    if evade_detail[:roll]
+      log << "#{dname} 회피 #{evade_detail[:rate]}% → #{evade_detail[:roll]} (#{evade_detail[:success] ? '회피' : '피격'})"
+    end
+    if evade_detail[:success]
+      log << "#{dname} 회피 — 피해 없음"
+      log << ''
+      return 0
+    end
+
+    base_dur = stats[:dur].to_i
+    base_dur = runner[:dur].to_i if base_dur <= 0 && runner[:dur]
+    eff_dur = base_dur + (dur_bonus ? dur_bonus[name].to_i : 0)
+    eff_dur = (eff_dur * (defended_multiplier ? defended_multiplier[name].to_f : 1.0)).ceil
+
+    dmg = BattleCalculator.calc_damage(raw_power.to_i, eff_dur.to_i)
+
+    if shields && shields[name].to_i > 0 && dmg > 0
+      blocked = [shields[name].to_i, dmg].min
+      shields[name] -= blocked
+      dmg -= blocked
+      log << "#{dname} 보호막 #{blocked} 흡수"
+    end
+
+    if stats[:house].to_s.strip == '후플푸프' && stats[:passive].to_s == '2' &&
+       ctx[:guard_used] && !ctx[:guard_used][name] && runner[:hp].to_i - dmg <= 0 && dmg > 0
+      dmg = runner[:hp].to_i - 1
+      ctx[:guard_used][name] = true
+      log << "#{dname}: [후플푸프] 전투 중 1회 — 건강 0 이하 방지"
+    end
+    runner[:hp] = [runner[:hp].to_i - dmg, 0].max
+    took_damage[name] = true if took_damage && dmg > 0
+
+    if ctx[:revenge] && ctx[:revenge][name] && dmg > 0 && runner_state
+      rev_by = ctx[:revenge][name][:by]
+      rev_actor = runner_state.find { |r| r[:name].to_s == rev_by.to_s }
+      if rev_actor && rev_actor[:hp].to_i > 0
+        rev_dname = rev_actor[:display_name].to_s.strip
+        rev_dname = rev_by.to_s if rev_dname.empty?
+        creature_eff_dur_rev = (creature[:dur].to_i + dur_bonus['__creature__'].to_i) * defended_multiplier['__creature__'].to_f
+        rev_dmg = BattleCalculator.calc_damage((dmg * ctx[:revenge][name][:multiplier]).ceil, creature_eff_dur_rev.to_i)
+        creature[:hp] = [creature[:hp].to_i - rev_dmg, 0].max
+        log << "#{rev_dname}의 복수 → #{creature[:name]}에게 #{rev_dmg} 반격 피해"
+      end
+    end
+
+    if ctx[:counter_debuff] && ctx[:counter_debuff][name] && dmg > 0
+      counter_mult = ctx[:counter_debuff][name][:multiplier].to_f
+      creature_eff_dur_counter = (creature[:dur].to_i + dur_bonus['__creature__'].to_i) * defended_multiplier['__creature__'].to_f
+      counter_dmg = BattleCalculator.calc_damage((dmg * counter_mult).ceil, creature_eff_dur_counter.to_i)
+      creature[:hp] = [creature[:hp].to_i - counter_dmg, 0].max
+      log << "#{dname}의 반격 디버프 → #{creature[:name]}에게 #{counter_dmg} 반사 피해"
+    end
+
+    log << "-#{dname}"
+    log << "피해:#{dmg}"
+    log << "HP: #{runner[:hp].to_i + dmg} → #{runner[:hp]}"
+
+    apply_debuff!(log, ctx, name, debuff, display_name: dname)
+
+    if runner[:hp].to_i <= 0
+      runner[:status] = '전투불가'
+      log << "#{dname} 전투불가"
+    end
+
+    dmg
+  end
+
+  def log_skill_header(log, creature, name, raw_power, range_label, debuff)
+    log << "▶ #{creature[:name]}의 #{name}"
+    log << "위력: #{raw_power}" if raw_power.to_i > 0
+    log << "범위: #{range_label}" unless range_label.to_s.strip.empty?
+    log << "디버프: #{debuff}" unless debuff.to_s.strip.empty?
+    desc = skill_description(creature)
+    log << desc unless desc.empty?
+    log << ''
+  end
+
+  def living_runners(runner_state)
+    runner_state.select { |runner| runner[:hp].to_i > 0 }
+  end
+
+  def targets_by_cells(runner_state, cells)
+    living_runners(runner_state).select do |runner|
+      cells.include?(runner[:pos].to_s.upcase)
+    end
+  end
+
+  def targets_by_name(runner_state, target_name)
+    target_names = target_name.to_s.split(',').map { |name| name.to_s.strip.gsub('@', '') }.reject(&:empty?)
+    return [] if target_names.empty?
+
+    living_runners(runner_state).select do |runner|
+      target_names.include?(runner[:name].to_s)
+    end
+  end
+
+  def random_targets(runner_state, count = 1)
+    living_runners(runner_state).sample(count.to_i <= 0 ? 1 : count.to_i)
+  end
+
+  def display_label(runner)
+    label = runner[:display_name].to_s.strip
+    label.empty? ? runner[:name].to_s : label
+  end
+
+  def apply_pattern!(log, runner_state, creature, ctx, stats_of: nil, dur_bonus: nil, defended_multiplier: nil, shields: nil, took_damage: nil, agi_bonus: nil)
+    name = pattern_name(creature)
+    return false if name.empty? || name == '-'
+
+    category = skill_category(creature)
+    cells = pattern_cells(creature)
+    target_name = skill_target(creature)
+    debuff = debuff_name(creature)
+    multiplier = pattern_multiplier(creature)
+    raw_power = pattern_damage(creature, multiplier)
+    shape = range_shape(creature)
+
+    # 현재스킬이 범위공격/전체공격/디버프가 아니더라도 보스스킬 탭의 분류/범위/대상으로 처리합니다.
+    if name == '전체공격' || shape == '전체' || creature[:skill_range_default].to_s.strip == '전체'
+      log_skill_header(log, creature, name, raw_power, '전체', debuff)
+      targets = living_runners(runner_state)
+
+      if targets.empty?
+        log << '대상 없음'
+        log << '피해 없음'
+      else
+        targets.each do |runner|
+          apply_pattern_damage_to_runner!(
+            log, runner, creature, raw_power, debuff, ctx,
+            stats_of: stats_of,
+            dur_bonus: dur_bonus,
+            defended_multiplier: defended_multiplier,
+            shields: shields,
+            took_damage: took_damage,
+            agi_bonus: agi_bonus,
+            runner_state: runner_state,
+            multi_target: true
+          )
+        end
+      end
+
+      return true
+    end
+
+    if name == '디버프' || category == '디버프'
+      return false if cells.empty? && target_name.empty?
+      range_label = cells.empty? ? target_name : range_text(cells)
+      log_skill_header(log, creature, name, 0, range_label, debuff)
+      targets = cells.empty? ? targets_by_name(runner_state, target_name) : targets_by_cells(runner_state, cells)
+
+      if targets.empty?
+        log << '대상 없음'
+        log << '피해 없음'
+      else
+        targets.each { |runner| apply_debuff!(log, ctx, runner[:name], debuff, display_name: display_label(runner)) }
+      end
+
+      return true
+    end
+
+    # 공격 스킬: 스킬범위 좌표가 있으면 해당 칸, 스킬대상이 있으면 해당 러너.
+    # 둘 다 비어 있으면 기본 공격처럼 살아있는 러너 1명을 무작위 대상으로 삼습니다.
+    targets = []
+    range_label = ''
+
+    multi_target = false
+    if cells.any?
+      targets = targets_by_cells(runner_state, cells)
+      range_label = range_text(cells)
+      multi_target = true
+    elsif !target_name.empty?
+      targets = targets_by_name(runner_state, target_name)
+      range_label = target_name
+    elsif name == '지정공격다인'
+      targets = random_targets(runner_state, target_count(creature))
+      range_label = targets.map { |t| display_label(t) }.join(', ')
+      multi_target = true
+    else
+      targets = random_targets(runner_state, 1)
+      range_label = targets.map { |t| display_label(t) }.join(', ')
+    end
+
+    log_skill_header(log, creature, name, raw_power, range_label, debuff)
+
+    if targets.empty?
+      log << '대상 없음'
+      log << '피해 없음'
+    else
+      targets.each do |runner|
+        apply_pattern_damage_to_runner!(
+          log, runner, creature, raw_power, debuff, ctx,
+          stats_of: stats_of,
+          dur_bonus: dur_bonus,
+          defended_multiplier: defended_multiplier,
+          shields: shields,
+          took_damage: took_damage,
+          agi_bonus: agi_bonus,
+          runner_state: runner_state,
+          multi_target: multi_target
+        )
+      end
+    end
+
+    true
+  end
+end
