@@ -1,8 +1,8 @@
 # local_sheet.rb
 # encoding: UTF-8
 #
-# 구글 시트 대신 data/raid.json 파일을 "시트"처럼 읽고 쓰는 클래스.
-# 전투봇의 SheetManager를 그대로 상속하고 맨 아래 입출력(read/write/append)만
+# data/raid.json 파일을 "시트"처럼 읽고 쓰는 클래스.
+# battle/ 의 SheetManager를 그대로 상속하고 맨 아래 입출력(read/write/append)만
 # 바꾸므로, 스탯 읽기·체력 기록 같은 기존 규칙 코드는 한 줄도 바뀌지 않는다.
 
 require 'json'
@@ -121,7 +121,7 @@ class LocalSheet < SheetManager
     letters.chars.reduce(0) { |acc, ch| acc * 26 + (ch.ord - 64) } - 1
   end
 
-  # "'스탯'!A2:M100", "보스스킬!A2:L300", "전투로그!A:E", "'실행'!A2" 등
+  # "'스탯'!A2:M100", "크리쳐스킬!A2:L300", "전투로그!A:E", "'실행'!A2" 등
   def parse_range(range)
     tab, cells = range.to_s.split('!', 2)
     tab = tab.to_s.delete("'")

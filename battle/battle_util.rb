@@ -5,7 +5,7 @@ def new_passive_ctx
     round: 1,
     prev_took_damage: {},
     prev_action: {},
-    slytherin_luck: Hash.new(0),
+    watchful_luck: Hash.new(0),
     guard_used: {},
     cooldowns: Hash.new { |h, k| h[k] = {} },
     once_used: Hash.new { |h, k| h[k] = {} },

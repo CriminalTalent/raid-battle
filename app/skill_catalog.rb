@@ -12,7 +12,7 @@ module SkillCatalog
   KINDS = {
     'attack' => '단일 공격 (마법능력×배율)',
     'attack_debuff' => '공격 + 시야차단',
-    'confusion' => '혼란 공격 (2중첩 시 보스 행동 무효)',
+    'confusion' => '혼란 공격 (2중첩 시 크리쳐 행동 무효)',
     'rush' => '습격 (돌진 후 공격, 도착 칸 지정)',
     'area_attack' => '점유칸 수만큼 피해 (폭발)',
     'sacrifice_attack' => '자기 체력 소모 공격 (고육지책)',
@@ -123,7 +123,7 @@ module SkillCatalog
       raise "스킬 이름에는 [ ] / , 를 쓸 수 없습니다: #{name}" if name.match?(%r{[\[\]/,]})
       raise "같은 이름의 스킬이 두 개 있습니다: #{name}" if names.include?(name)
       raise "'#{name}'의 효과를 목록에서 골라 주세요." unless KINDS.key?(r[2].to_s.strip)
-      raise "'#{name}'은(는) 보스 전용 스킬 이름이라 쓸 수 없습니다." if BOSS_ONLY.include?(name)
+      raise "'#{name}'은(는) 크리쳐 전용 스킬 이름이라 쓸 수 없습니다." if BOSS_ONLY.include?(name)
       names << name
     end
     rows.each { |r| r[0] = FIXED[r[2].to_s.strip] if FIXED.key?(r[2].to_s.strip) }

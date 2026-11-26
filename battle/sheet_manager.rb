@@ -1,160 +1,41 @@
 # sheet_manager.rb
 # encoding: UTF-8
-
-require 'google/apis/sheets_v4'
-require 'googleauth'
+#
+# 러너·크리쳐 표를 읽고 쓰는 기본 클래스.
+# 실제 저장(read / write / append)은 app/local_sheet.rb 의 LocalSheet 가 data/raid.json 으로 한다.
+# 이 파일에는 표의 칸 배치(어느 칸이 어떤 스탯인지)와 그 해석만 있다.
 
 class SheetManager
-  def initialize(sheet_id, credentials_path)
-    @sheet_id = sheet_id
-
-    @service = Google::Apis::SheetsV4::SheetsService.new
-    @service.client_options.application_name = 'TH3V151T0R5 BattleBot'
-    @service.authorization = Google::Auth::ServiceAccountCredentials.make_creds(
-      json_key_io: File.open(credentials_path),
-      scope: ['https://www.googleapis.com/auth/spreadsheets']
-    )
-  end
-
-  # 429 / 할당량 초과(RateLimitError) 등 일시적 오류에 대해 최대 3회 재시도한다.
-  # (조사봇 sheet_manager.rb에 이미 있던 것과 동일한 패턴 — 이 파일에는 지금까지
-  # 재시도 로직이 아예 없어서, 순간적으로 할당량을 초과하면 재시도 없이 바로
-  # 빈 배열/false로 처리되고 있었다.)
-  def with_retry(label, max_retries: 3)
-    attempt = 0
-    begin
-      yield
-    rescue Google::Apis::RateLimitError, Google::Apis::ServerError, Google::Apis::TransmissionError => e
-      attempt += 1
-      if attempt <= max_retries
-        wait_seconds = 1.5 * attempt
-        puts "[시트 재시도] #{label}: #{e.class} - #{wait_seconds}초 후 재시도 (#{attempt}/#{max_retries})"
-        sleep(wait_seconds)
-        retry
-      else
-        raise
-      end
-    end
-  end
-
-  # ──────────────────────────────────────────────
-  # 전투로그 탭 기록 (실패해도 봇 동작에는 영향 없음)
-  # ──────────────────────────────────────────────
-
   BATTLE_LOG_SHEET = '전투로그'.freeze
 
-  def append_battle_log(row)
-    body = Google::Apis::SheetsV4::ValueRange.new(values: [row])
-    with_retry("추가 #{BATTLE_LOG_SHEET}") do
-      @service.append_spreadsheet_value(
-        @sheet_id, "#{BATTLE_LOG_SHEET}!A:E", body,
-        value_input_option: 'RAW'
-      )
-    end
-    true
-  rescue => e
-    puts "[전투로그 기록 실패] #{e.class}: #{e.message}"
-    false
-  end
-
   # ──────────────────────────────────────────────
-  # 현상금 사냥 참여 기록 (1인당 1일 1회 제한용)
-  # ──────────────────────────────────────────────
-  BOUNTY_LOG_SHEET = '현상금기록'.freeze
-
-  def bounty_participated_today?(acct, today)
-    acct = acct.to_s.gsub('@', '').strip
-    rows = read("#{BOUNTY_LOG_SHEET}!A:B")
-    return false if rows.empty?
-
-    rows.any? do |row|
-      row[0].to_s.strip == today.to_s && row[1].to_s.gsub('@', '').strip == acct
-    end
-  rescue => e
-    puts "[현상금기록 조회 실패] #{e.class}: #{e.message}"
-    false
-  end
-
-  def mark_bounty_participated!(acct, today)
-    acct = acct.to_s.gsub('@', '').strip
-    body = Google::Apis::SheetsV4::ValueRange.new(values: [[today.to_s, acct]])
-    with_retry("추가 #{BOUNTY_LOG_SHEET}") do
-      @service.append_spreadsheet_value(
-        @sheet_id, "#{BOUNTY_LOG_SHEET}!A:B", body,
-        value_input_option: 'RAW'
-      )
-    end
-    true
-  rescue => e
-    puts "[현상금기록 기록 실패] #{e.class}: #{e.message}"
-    false
-  end
-
-  # ──────────────────────────────────────────────
-  # 기본 I/O
+  # 기본 I/O (LocalSheet 가 덮어쓴다)
   # ──────────────────────────────────────────────
 
-  def read(range)
-    with_retry("읽기 #{range}") do
-      @service.get_spreadsheet_values(@sheet_id, range).values || []
-    end
-  rescue => e
-    puts "[시트 읽기 오류] #{range}: #{e.message}"
+  def read(_range)
     []
   end
 
-  def write(range, values)
-    body = Google::Apis::SheetsV4::ValueRange.new(values: values)
-    with_retry("쓰기 #{range}") do
-      @service.update_spreadsheet_value(
-        @sheet_id,
-        range,
-        body,
-        value_input_option: 'USER_ENTERED'
-      )
-    end
-    true
-  rescue => e
-    puts "[시트 쓰기 오류] #{range}: #{e.message}"
+  def write(_range, _values)
     false
   end
 
   def write_raw(range, values)
-    body = Google::Apis::SheetsV4::ValueRange.new(values: values)
-    with_retry("쓰기(RAW) #{range}") do
-      @service.update_spreadsheet_value(
-        @sheet_id,
-        range,
-        body,
-        value_input_option: 'RAW'
-      )
-    end
-    true
-  rescue => e
-    puts "[시트 쓰기 오류] #{range}: #{e.message}"
+    write(range, values)
+  end
+
+  def append(_range, _values)
     false
   end
 
-  def append(range, values)
-    body = Google::Apis::SheetsV4::ValueRange.new(values: [values])
-    with_retry("추가 #{range}") do
-      @service.append_spreadsheet_value(
-        @sheet_id,
-        range,
-        body,
-        value_input_option: 'USER_ENTERED'
-      )
-    end
-    true
-  rescue => e
-    puts "[시트 추가 오류] #{range}: #{e.message}"
-    false
+  def append_battle_log(row)
+    append("#{BATTLE_LOG_SHEET}!A:E", row)
   end
 
   # ──────────────────────────────────────────────
   # 실행 탭
-  # A2 = 전투봇 켜기/끄기 체크박스
-  # B2 = 퍼블릭/DM 체크박스
+  # A2 = 전투 켜기/끄기 체크박스
+  # B2 = 공개 범위 체크박스
   # ──────────────────────────────────────────────
 
   def read_bot_on
@@ -163,14 +44,8 @@ class SheetManager
     truthy?(rows[0][0])
   end
 
-  # 시트 읽기 실패(타임아웃 등) 시 nil을 반환해 호출부가 이전 상태를 유지할 수 있게 합니다.
   def read_bot_on_or_nil
-    rows = with_retry("읽기 '실행'!A2") { @service.get_spreadsheet_values(@sheet_id, "'실행'!A2").values || [] }
-    return false if rows.empty? || rows[0].nil?
-    truthy?(rows[0][0])
-  rescue => e
-    puts "[시트 읽기 오류] '실행'!A2: #{e.message} (이전 상태 유지)"
-    nil
+    read_bot_on
   end
 
   def read_visibility
@@ -207,7 +82,7 @@ class SheetManager
   # ──────────────────────────────────────────────
 
   def read_creature_config
-    # 보스 탭은 사용하지 않습니다. 크리쳐는 스탯 탭의 활성 행으로만 결정합니다.
+    # 크리쳐 탭은 사용하지 않습니다. 크리쳐는 스탯 탭의 활성 행으로만 결정합니다.
     nil
   end
 
@@ -217,7 +92,7 @@ class SheetManager
   # 자동봇 시트 / 스탯 탭 구조:
   # A ID
   # B 이름
-  # C 기숙사
+  # C 팀
   # D 패시브선택
   # E 건강 (현재체력)
   # F 내구도
@@ -232,7 +107,7 @@ class SheetManager
   # E열 건강은 전투 중 현재 체력으로 갱신합니다.
   # 최대체력은 항상 K열(최대건강)에서 읽습니다 (E열로 대체하지 않음).
   #
-  # read_base_stats는 한 라운드 처리(안내/보스행동커맨드 파싱/정산) 중
+  # read_base_stats는 한 라운드 처리(안내/크리쳐행동커맨드 파싱/정산) 중
   # 여러 지점에서 각각 독립적으로 호출되어 '스탯'!A2:M100 읽기가 짧은
   # 간격에 중복 발생하는 게 확인되어, 짧은 TTL 캐시를 추가했습니다.
   # HP(E열)는 라운드 중 세션 메모리(ctx) 상태를 기준으로 판정하므로,
@@ -293,7 +168,7 @@ class SheetManager
 
   # 크리쳐 스탯 탭 실제 컬럼 순서 (2026-08-13 확정, main.rb의 read_base_stats가
   # 읽는 러너용 '스탯' 탭과는 다른 스프레드시트/다른 배치이므로 절대 혼동 금지):
-  # A=활성 B=이름 C=위치 D=크기 E=현재스킬 F=건강 G=내구도 H=마법능력 I=민첩 J=기술 K=행운 L=비고 M=보상크레딧
+  # A=활성 B=이름 C=위치 D=크기 E=현재스킬 F=건강 G=내구도 H=마법능력 I=민첩 J=기술 K=행운 L=비고 M=보상골드
   # (별도 '최대건강' 컬럼 없음 — 크리쳐는 F열 건강 값을 그대로 최대건강으로도 사용)
   def read_creature_stats(creature_name)
     creature_name = creature_name.to_s.strip

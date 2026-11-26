@@ -39,7 +39,7 @@ const SCHEMA = {
     fields: [
       [0, 'ID'], [1, '표시 이름'], [2, '팀', 'team'], [3, '팀 패시브 (둘 중 하나)', 'passive'],
       [4, '현재 건강', 'num'], [10, '최대 건강', 'num'], [5, '내구도', 'num'], [6, '마법능력', 'num'],
-      [7, '민첩', 'num'], [8, '기술', 'num'], [9, '행운', 'num'], [13, '역할', ROLES], [11, '전용 스킬 (누르면 넣기/빼기 · 기본 스킬 말고 이 러너만 더 쓸 수 있어요)', 'myskills'], [17, '크레딧 (승리 보상·패배 압수가 여기에 반영)', 'num'],
+      [7, '민첩', 'num'], [8, '기술', 'num'], [9, '행운', 'num'], [13, '역할', ROLES], [11, '전용 스킬 (누르면 넣기/빼기 · 기본 스킬 말고 이 러너만 더 쓸 수 있어요)', 'myskills'], [17, '골드 (승리 보상·패배 압수가 여기에 반영)', 'num'],
       [15, '장비 (종류마다 하나씩 · 누르면 착용/해제 · 전투 스탯에 보너스가 더해져요)', 'equip'],
       [16, '소지품 (전투 중 쓸 수 있는 회복 아이템 개수 · 쓰면 1개씩 줄어요)', 'inv'],
       [14, '두상 이미지 (선택 · 얼굴이 가운데 오게 정사각형으로 잘려요)', 'image']
@@ -47,21 +47,21 @@ const SCHEMA = {
     blank: () => ['', '', '', '1', '50', '10', '10', '10', '10', '10', '50', '', '하', '공격', '', '', '', '0']
   },
   creatures: {
-    title: '크리쳐 (보스몹)', keyCol: 1, sub: r => `HP ${r[5] || '-'} · ${r[2] || 'D4'} · ${r[3] || '1x1'}`,
-    help: '보스몹의 이름·스탯·머리 방향·쓰는 스킬을 정해요. 위치는 머리 칸(A1~G8), 크기 2x2면 머리 칸에서 오른쪽·아래로 넓어져요. 자동 행동은 "쓰는 스킬" 중에서 쿨타임이 돌아온 것, 직전과 다른 것을 고릅니다.',
+    title: '크리쳐', keyCol: 1, sub: r => `HP ${r[5] || '-'} · ${r[2] || 'D4'} · ${r[3] || '1x1'}`,
+    help: '크리쳐의 이름·스탯·머리 방향·쓰는 스킬을 정해요. 위치는 머리 칸(A1~G8), 크기 2x2면 머리 칸에서 오른쪽·아래로 넓어져요. 자동 행동은 "쓰는 스킬" 중에서 쿨타임이 돌아온 것, 직전과 다른 것을 고릅니다.',
     fields: [
       [1, '이름'], [2, '위치 (머리 칸)'], [3, '크기', ['1x1', '2x1', '1x2', '2x2', '3x2', '2x3', '3x3']], [15, '방향', FACING],
       [5, '건강', 'num'], [6, '내구도', 'num'], [7, '마법능력', 'num'], [8, '민첩', 'num'],
       [9, '기술', 'num'], [10, '행운', 'num'], [13, '명중 기본 (빈칸=60)', 'num'], [14, '회피 기본', 'num'],
-      [4, '고정 스킬 (선택)', 'bossskill'], [16, '이 보스가 쓰는 스킬 (누르면 넣기/빼기 · 아무것도 안 고르면 전체)', 'skilllist'],
-      [12, '승리 보상 (참여자 1명당 크레딧)', 'num'], [18, '패배 시 압수 (참여자 1명당 크레딧)', 'num'],
-      [11, '메모', 'wide'], [17, '보스 이미지 (선택)', 'image']
+      [4, '고정 스킬 (선택)', 'bossskill'], [16, '이 크리쳐가 쓰는 스킬 (누르면 넣기/빼기 · 아무것도 안 고르면 전체)', 'skilllist'],
+      [12, '승리 보상 (참여자 1명당 골드)', 'num'], [18, '패배 시 압수 (참여자 1명당 골드)', 'num'],
+      [11, '메모', 'wide'], [17, '크리쳐 이미지 (선택)', 'image']
     ],
     blank: () => ['', '새 크리쳐', 'D4', '1x1', '', '200', '10', '15', '5', '5', '5', '', '0', '', '', '하', '', '', '0']
   },
   boss_skills: {
-    title: '보스 스킬', keyCol: 0, sub: r => `${r[1] || '공격'} · ${r[2] || (r[9] ? '대상 ' + r[9] + '명' : '무작위 1명')}`,
-    help: '+ 추가로 보스 스킬을 얼마든지 만들 수 있어요. 만든 스킬은 크리쳐 메뉴의 "이 보스가 쓰는 스킬"에서 넣어 주세요. 범위: 비우면 대상 수만큼 무작위 · 전체 = 전원 · 주변N = 보스 몸 주변 N칸 · 전방N = 머리 방향으로 N칸 · 칸 목록(C6,D6) = 그 칸. 위력은 피해 공식이 비면 마법능력×배율.',
+    title: '크리쳐 스킬', keyCol: 0, sub: r => `${r[1] || '공격'} · ${r[2] || (r[9] ? '대상 ' + r[9] + '명' : '무작위 1명')}`,
+    help: '+ 추가로 크리쳐 스킬을 얼마든지 만들 수 있어요. 만든 스킬은 크리쳐 메뉴의 "이 크리쳐가 쓰는 스킬"에서 넣어 주세요. 범위: 비우면 대상 수만큼 무작위 · 전체 = 전원 · 주변N = 크리쳐 몸 주변 N칸 · 전방N = 머리 방향으로 N칸 · 칸 목록(C6,D6) = 그 칸. 위력은 피해 공식이 비면 마법능력×배율.',
     fields: [
       [0, '스킬명'], [1, '분류', ['공격', '디버프']], [2, '범위', 'range'], [9, '대상 수', 'num'],
       [4, '배율'], [6, '피해 공식 (예: 고정 20, 마법×1.5)'], [5, '디버프', ['', '독', '둔화', '약화', '취약', '기절', '반격']], [3, '쿨타임', 'num'],
@@ -174,7 +174,7 @@ function draw() {
   if (!view) return;
   const counts = k => Math.max(0, (view.tables[k] || []).length - 1);
   const items = [['battle', '전투 진행', view.battles.filter(b => b.active).length], ['runners', '러너', counts('runners')],
-    ['creatures', '크리쳐 (보스몹)', counts('creatures')], ['boss_skills', '보스 스킬', counts('boss_skills')], ['runner_skills', '러너 스킬', counts('runner_skills')],
+    ['creatures', '크리쳐', counts('creatures')], ['boss_skills', '크리쳐 스킬', counts('boss_skills')], ['runner_skills', '러너 스킬', counts('runner_skills')],
     ['items', '아이템', counts('items')], ['teams', '팀', counts('teams')], ['settings', '설정', '']];
   const m = msg ? `<div class="msg ${msg.cls}">${esc(msg.text)}</div>` : '';
   $('root').innerHTML = `<div class="admin">
@@ -206,9 +206,9 @@ function battleHTML() {
   let h = `<div class="card"><div class="card-h"><h2>새 전투</h2><button class="sm" id="heal">러너 전원 체력 회복</button></div>
     <div class="bt">
       <div>
-        <div class="sec" style="margin-top:0">상대 보스몹</div>
+        <div class="sec" style="margin-top:0">상대 크리쳐</div>
         <div class="btns" style="flex-wrap:nowrap"><select id="creature">${view.creature_names.map(n => `<option ${form.creature === n ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>
-          <label class="chk" style="white-space:nowrap"><input type="checkbox" id="auto" ${form.auto ? 'checked' : ''}>보스 자동 행동</label></div>
+          <label class="chk" style="white-space:nowrap"><input type="checkbox" id="auto" ${form.auto ? 'checked' : ''}>크리쳐 자동 행동</label></div>
         <div class="sec">참여자 (저장된 러너 중에서 고르기)</div>
         ${form.slots.map(slotHTML).join('') || '<div class="sub" style="margin-bottom:6px">아래 버튼으로 참여자를 넣으세요.</div>'}
         <div class="btns"><button class="sm" id="addslot" ${roster.some(r => free(r[0])) ? '' : 'disabled'}>+ 참여자 추가</button>
@@ -241,12 +241,12 @@ function battleCard(b) {
     <div class="btns" style="margin-bottom:8px"><button class="primary" data-begin="${b.id}" data-all="${allReady ? 1 : 0}">전투 시작</button></div>` : '';
 
   let boss = '';
-  if (b.active && b.awaiting_boss) boss = `<div class="msg info" style="margin-bottom:8px">보스 행동을 정하세요. 대상이나 칸을 안 고르면 스킬 설정대로 정해집니다.</div>
+  if (b.active && b.awaiting_boss) boss = `<div class="msg info" style="margin-bottom:8px">크리쳐 행동을 정하세요. 대상이나 칸을 안 고르면 스킬 설정대로 정해집니다.</div>
     <div class="btns">${(b.boss_skills || view.boss_skills).map(s => `<button class="sm ${p.skill === s ? 'on' : ''}" data-bskill="${b.id}|${esc(s)}">${esc(s)}</button>`).join('')}</div>
     <div class="sec">대상 러너</div><div class="btns">${b.runners.map(r => `<button class="sm ${p.targets.has(r) ? 'on' : ''}" data-btarget="${b.id}|${esc(r)}">${esc(disp(r))}${roleOf(r) ? ' · ' + esc(roleOf(r)) : ''}</button>`).join('')}
       <button class="sm ghost" data-btank="${b.id}">수호 역할 전원</button></div>
     <div class="sub" style="margin:6px 0">범위 칸: 격자를 누르세요 · ${[...p.cells].join(', ') || '없음'}</div>
-    <div class="btns"><button class="primary sm" data-bgo="${b.id}" ${p.skill ? '' : 'disabled'}>보스 행동 확정</button><button class="sm ghost" data-bclear="${b.id}">지우기</button></div>`;
+    <div class="btns"><button class="primary sm" data-bgo="${b.id}" ${p.skill ? '' : 'disabled'}>크리쳐 행동 확정</button><button class="sm ghost" data-bclear="${b.id}">지우기</button></div>`;
 
   return `<div class="card">
     <div class="card-h"><h2>${esc(b.creature)} <span class="sub">${b.phase === 'lobby' ? '대기' : b.phase === 'prep' ? '준비' : b.round + 'R'} · ${b.active ? esc(PHASE[b.phase] || '') : '종료'}</span></h2>
@@ -305,7 +305,7 @@ function bindBattle() {
   document.querySelectorAll('[data-bclear]').forEach(b => b.onclick = () => { delete bossPick[b.dataset.bclear]; render(); });
   document.querySelectorAll('[data-bgo]').forEach(b => b.onclick = () => {
     const id = b.dataset.bgo, p = bossPick[id]; delete bossPick[id];
-    act('/api/admin/boss', { id, skill: p.skill, targets: [...p.targets], cells: [...p.cells] }, `보스 행동: ${p.skill}`);
+    act('/api/admin/boss', { id, skill: p.skill, targets: [...p.targets], cells: [...p.cells] }, `크리쳐 행동: ${p.skill}`);
   });
   document.querySelectorAll('[data-grid]').forEach(g => bindGrid(g, pos => { const c = bossPick[g.dataset.grid].cells; c.has(pos) ? c.delete(pos) : c.add(pos); render(); }));
   document.querySelectorAll('[data-auto]').forEach(b => b.onclick = () => { const bt = view.battles.find(x => x.id === b.dataset.auto); act('/api/admin/auto', { id: bt.id, on: !bt.auto }); });

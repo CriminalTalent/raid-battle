@@ -68,7 +68,7 @@ function commandText() {
   const s = skillOf(pick.skill); if (!s) return '';
   const nm = n => ((battle.runners || []).find(r => r.name === n) || {}).display || n;
   const parts = [];
-  if (['creature', 'creature_cell'].includes(s.target)) parts.push(battle.creature?.name || '보스');
+  if (['creature', 'creature_cell'].includes(s.target)) parts.push(battle.creature?.name || '크리쳐');
   if (pick.runners.length && ['runner', 'runner_cell', 'runner_skill'].includes(s.target)) parts.push(pick.runners.map(nm).join(', '));
   if (pick.cell && ['cell', 'creature_cell', 'runner_cell'].includes(s.target)) parts.push(pick.cell);
   if (pick.sub && s.target === 'runner_skill') parts.push(pick.sub);
@@ -180,7 +180,7 @@ function legendHTML(s) {
   if (!s) return '<span class="sub">스킬에 마우스를 올리면 사거리가 격자에 표시돼요.</span>';
   if (s.item) return `<span class="sub">${esc(s.name)} · 사거리 제한 없음 (1명)</span>`;
   const n = rangeSet(s).size;
-  return `<span class="key inr"></span><span>${esc(s.name)} 사거리 ${esc(s.range || '-')}</span>${n ? '' : ' <span class="sub">(자신에게만 / 사거리 없음)</span>'}<span class="key bs"></span><span>보스 범위</span>`;
+  return `<span class="key inr"></span><span>${esc(s.name)} 사거리 ${esc(s.range || '-')}</span>${n ? '' : ' <span class="sub">(자신에게만 / 사거리 없음)</span>'}<span class="key bs"></span><span>크리쳐 범위</span>`;
 }
 function previewRange(s) {
   const set = rangeSet(s);
@@ -218,7 +218,7 @@ function draw() {
       ${battle.phase !== 'lobby' ? actCard : ''}
     </div>
     <div>
-      <div class="card"><div class="panel-h boss">보스</div>${bossCardHTML(battle)}</div>
+      <div class="card"><div class="panel-h boss">크리쳐</div>${bossCardHTML(battle)}</div>
       <div class="card"><div class="card-h"><h2>응원</h2></div>${cheerFeedHTML(battle, 4)}</div>
       <div class="card"><div class="card-h"><h2>전투 기록</h2></div><div class="log" style="max-height:380px">${logHTML(battle, battle.active ? 8 : 200)}</div></div>
     </div>

@@ -257,7 +257,7 @@ module BattleGrid
   def symbol_maps(runner_state, creature)
     runner_names = runner_state.to_a.map { |r| r[:name].to_s }.reject(&:empty?).uniq
     runner_labels = runner_names.map { |n| display_name_for_runner(n, runner_state) }
-    creature_name = creature[:name].to_s.strip.empty? ? '보스' : creature[:name].to_s.strip
+    creature_name = creature[:name].to_s.strip.empty? ? '크리쳐' : creature[:name].to_s.strip
 
     all_display_names = runner_labels + [creature_name]
     all_symbols = unique_symbol_map(all_display_names)

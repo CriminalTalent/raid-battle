@@ -1,11 +1,11 @@
 # engine.rb
 # encoding: UTF-8
 #
-# 레이드 전투 엔진. 전투봇(battle/)의 규칙 코드를 그대로 불러와 쓴다.
-# - 명중/회피/크리티컬/피해 계산, 정산 순서, 스킬, 쿨타임, 기숙사 패시브: battle/*.rb 그대로
-# - 라운드 진행 함수(준비 → 보스 행동 → 행동 입력 → 정산): battle/main.rb 의 함수 본문을
+# 레이드 전투 엔진. battle/ 의 규칙 코드를 그대로 불러와 쓴다.
+# - 명중/회피/크리티컬/피해 계산, 정산 순서, 스킬, 쿨타임, 팀 패시브: battle/*.rb 그대로
+# - 라운드 진행 함수(준비 → 크리쳐 행동 → 행동 입력 → 정산): battle/round_flow.rb 의 함수 본문을
 #   실행 시점에 그대로 읽어 와 사용 (복사본을 따로 두지 않아 규칙이 어긋나지 않음)
-# - 마스토돈 게시 → 웹 전투 기록으로, 구글 시트 → data/raid.json 으로 대체
+# - 게시 → 웹 전투 기록으로, 표 → data/raid.json 으로 연결
 
 require 'set'
 require 'json'
@@ -15,7 +15,6 @@ require 'monitor'
 APP_DIR    = __dir__
 RAID_DATA_DIR = File.expand_path(ENV['RAID_DATA_DIR'].to_s.strip.empty? ? File.join(__dir__, 'data') : ENV['RAID_DATA_DIR'])
 BATTLE_DIR = File.expand_path('../battle', __dir__)
-$LOAD_PATH.unshift(File.join(APP_DIR, 'stubs'))
 
 ENV['WEB_ENABLED'] = 'true'
 
@@ -34,18 +33,17 @@ LOCATION_MAP = {}.freeze
 BOT_USERNAME = '__raid__'.freeze
 
 
-# ── battle/main.rb 에서 라운드 진행 함수만 그대로 불러오기 ─────────────────
+# ── battle/round_flow.rb 에서 라운드 진행 함수만 그대로 불러오기 ─────────────────
 MAIN_FUNCTIONS = %w[
   announce_prep_round handle_prep_input check_prep_completion
   announce_boss_turn announce_round process_action_for_session
-  award_victory_credits! confiscate_defeat_credits! announce_scout_directions!
   announce_manual_battle_end! flush_pending_result! settle_session_if_needed
   select_auto_skill
 ].freeze
 
 def load_main_functions!
 
-# 보스 자동 행동: 그 보스에 지정된 스킬 중에서, 쿨타임이 돌아온 것, 직전 라운드와 다른 것을 무작위로 고른다.
+# 크리쳐 자동 행동: 그 크리쳐에 지정된 스킬 중에서, 쿨타임이 돌아온 것, 직전 라운드와 다른 것을 무작위로 고른다.
 # (선택지가 하나뿐이면 연속 사용 허용 — 확정 사양 "자동모드 연속 스킬 금지")
 def select_auto_skill(creature, creature_sheet, ctx = nil)
   return nil unless creature && creature_sheet
@@ -67,19 +65,19 @@ rescue => e
   puts "[select_auto_skill 오류] #{e.class}: #{e.message}"
   nil
 end
-  src = File.read(File.join(BATTLE_DIR, 'main.rb'), encoding: 'UTF-8')
+  src = File.read(File.join(BATTLE_DIR, 'round_flow.rb'), encoding: 'UTF-8')
   lines = src.lines
   MAIN_FUNCTIONS.each do |name|
     start = lines.index { |l| l.start_with?("def #{name}(") }
-    raise "battle/main.rb 에서 #{name} 함수를 찾지 못했습니다" unless start
+    raise "battle/round_flow.rb 에서 #{name} 함수를 찾지 못했습니다" unless start
     stop = (start + 1...lines.size).find { |i| lines[i].rstrip == 'end' }
-    eval(lines[start..stop].join, TOPLEVEL_BINDING, File.join(BATTLE_DIR, 'main.rb'), start + 1)
+    eval(lines[start..stop].join, TOPLEVEL_BINDING, File.join(BATTLE_DIR, 'round_flow.rb'), start + 1)
   end
 end
 load_main_functions!
 
-# ── 보스 스킬 범위 확장: 보스스킬 표의 "범위"에 '주변N' / '전방N' 을 쓰면
-#    그 라운드 보스 위치·방향 기준으로 칸 목록을 계산해 기존 "칸 목록 공격" 규칙에 넘긴다.
+# ── 크리쳐 스킬 범위 확장: 크리쳐스킬 표의 "범위"에 '주변N' / '전방N' 을 쓰면
+#    그 라운드 크리쳐 위치·방향 기준으로 칸 목록을 계산해 기존 "칸 목록 공격" 규칙에 넘긴다.
 alias __rule_apply_boss_skill_definition! apply_boss_skill_definition!
 def apply_boss_skill_definition!(creature, creature_sheet)
   __rule_apply_boss_skill_definition!(creature, creature_sheet)
@@ -116,8 +114,8 @@ def boss_area_cells(creature, kind, n)
   out.uniq
 end
 
-# ── 마스토돈 게시 대신: 웹 전투 기록에 남긴다 ──────────────────────────────
-# 마스토돈용 안내 문구(입력 형식, 텍스트 격자맵)는 웹 화면에 이미 있으므로 기록에서 뺀다.
+# ── 게시: 웹 전투 기록에 남긴다 ──────────────────────────────
+# 텍스트용 안내 문구(입력 형식, 텍스트 격자맵)는 웹 화면에 이미 있으므로 기록에서 뺀다.
 def web_log_text(text)
   out = []
   skip_map = false
@@ -137,7 +135,7 @@ def web_log_text(text)
   RaidEngine::PASSIVES.each_value do |house, _n, label, _d, phrases|
     phrases.each { |ph| text = text.gsub(/\[#{house}\]( ?[^\n]*#{Regexp.escape(ph)})/) { "[#{label}]#{$1}" } }
   end
-  text = text.gsub(/\[(그리핀도르|슬리데린|래번클로|후플푸프)\]/, '[팀 패시브]').gsub('[기숙사 패시브]', '[팀 패시브]')
+  text = text.gsub(/\[(팀A|팀B|팀C|팀D)\]/, '[팀 패시브]')
   if $raid_engine
     $raid_engine.table_rows('runner', '스탯').each do |r|
       id = r[0].to_s.strip
@@ -176,7 +174,7 @@ module BattleItems
   end
 end
 
-# 마스토돈 DM 대신 참여자 화면에 안내 문구를 띄운다.
+# 개인 안내는 참여자 화면에 띄운다.
 class WebListener
   def initialize
     @notices = {}
@@ -236,31 +234,31 @@ class RaidEngine
     @store.save!
   end
 
-  RUNNER_HEADER = %w[ID 이름 팀 패시브선택 건강 내구도 마법능력 민첩 기술 행운 최대건강 스킬2 방향 역할 이미지 장비 소지품 크레딧].freeze
+  RUNNER_HEADER = %w[ID 이름 팀 패시브선택 건강 내구도 마법능력 민첩 기술 행운 최대건강 스킬2 방향 역할 이미지 장비 소지품 골드].freeze
   ITEM_HEADER = %w[이름 종류 회복량 내구도 마법능력 민첩 기술 행운 설명].freeze
   ITEM_TYPES = %w[회복 무기 갑옷 장신구].freeze
   # 아이템 표의 보너스 칸 번호 → 전투 스탯 키
   ITEM_BONUS = { 3 => :dur, 4 => :atk, 5 => :agi, 6 => :tec, 7 => :luck }.freeze
   ROLE_RENAME = { '탱커' => '수호', '딜러' => '공격', '힐러' => '지원' }.freeze
 
-  # 팀 패시브: 계산은 기존 규칙(기숙사 패시브 8종)을 그대로 쓰고, 화면에는 이 이름으로만 보인다.
+  # 팀 패시브: 계산은 기존 규칙(팀 패시브 8종)을 그대로 쓰고, 화면에는 이 이름으로만 보인다.
   # 코드 => [규칙 내부 이름, 패시브 번호, 보이는 이름, 설명, 기록에서 찾을 문구들]
   PASSIVES = {
-    'front_guard' => ['그리핀도르', '1', '정면 수호', '보스 정면 1칸에 서 있으면 내구도 +50%', ['적 정면']],
-    'last_stand'  => ['그리핀도르', '2', '역경', '건강이 40% 미만이면 마법능력 +50%', ['건강 40%']],
-    'unscathed'   => ['슬리데린', '1', '무결', '이전 라운드에 피해가 없었으면 마법능력 +50%', ['이전 라운드 무피해']],
-    'watchful'    => ['슬리데린', '2', '관망', '관찰(행동 포기)하면 다음 라운드부터 행운 +10', ['관찰 보너스', '행동을 포기']],
-    'insight'     => ['래번클로', '1', '통찰', '보스가 상태이상이면 마법능력 +50%', ['적 상태이상']],
-    'adapt'       => ['래번클로', '2', '변통', '직전 라운드와 다른 분류의 행동을 하면 기술 +10', ['행동 분류']],
-    'endure'      => ['후플푸프', '1', '인내', '이전 라운드에 맞았으면 내구도 +50%', ['이전 라운드 피격']],
-    'survive'     => ['후플푸프', '2', '불굴', '전투 중 1회, 건강이 0 이하가 되는 것을 막음', ['전투 중 1회', '건강 0 이하', '패시브로']]
+    'front_guard' => ['팀A', '1', '정면 수호', '크리쳐 정면 1칸에 서 있으면 내구도 +50%', ['적 정면']],
+    'last_stand'  => ['팀A', '2', '역경', '건강이 40% 미만이면 마법능력 +50%', ['건강 40%']],
+    'unscathed'   => ['팀B', '1', '무결', '이전 라운드에 피해가 없었으면 마법능력 +50%', ['이전 라운드 무피해']],
+    'watchful'    => ['팀B', '2', '관망', '관찰(행동 포기)하면 다음 라운드부터 행운 +10', ['관찰 보너스', '행동을 포기']],
+    'insight'     => ['팀C', '1', '통찰', '크리쳐가 상태이상이면 마법능력 +50%', ['적 상태이상']],
+    'adapt'       => ['팀C', '2', '변통', '직전 라운드와 다른 분류의 행동을 하면 기술 +10', ['행동 분류']],
+    'endure'      => ['팀D', '1', '인내', '이전 라운드에 맞았으면 내구도 +50%', ['이전 라운드 피격']],
+    'survive'     => ['팀D', '2', '불굴', '전투 중 1회, 건강이 0 이하가 되는 것을 막음', ['전투 중 1회', '건강 0 이하', '패시브로']]
   }.freeze
   TEAM_HEADER = %w[ID 이름 패시브1 패시브2 설명].freeze
   DEFAULT_TEAMS = [
-    ['team1', '선봉대', 'front_guard', 'last_stand', '앞에 서서 버티는 팀', '그리핀도르'],
-    ['team2', '그림자단', 'unscathed', 'watchful', '피해를 피하며 기회를 노리는 팀', '슬리데린'],
-    ['team3', '탐구회', 'insight', 'adapt', '상황을 읽고 바꿔 가며 싸우는 팀', '래번클로'],
-    ['team4', '수호단', 'endure', 'survive', '맞으며 버티는 팀', '후플푸프']
+    ['team1', '선봉대', 'front_guard', 'last_stand', '앞에 서서 버티는 팀', '팀A'],
+    ['team2', '그림자단', 'unscathed', 'watchful', '피해를 피하며 기회를 노리는 팀', '팀B'],
+    ['team3', '탐구회', 'insight', 'adapt', '상황을 읽고 바꿔 가며 싸우는 팀', '팀C'],
+    ['team4', '수호단', 'endure', 'survive', '맞으며 버티는 팀', '팀D']
   ].freeze
 
   def team_rows
@@ -271,7 +269,7 @@ class RaidEngine
     team_rows.find { |r| r[0].to_s.strip == id.to_s.strip }
   end
 
-  # 러너의 팀·패시브 선택(1/2) → 기존 규칙이 알아듣는 기숙사·패시브 번호
+  # 러너의 팀·패시브 선택(1/2) → 기존 규칙이 알아듣는 팀·패시브 번호
   def rule_passive(team_id, pick)
     team = team_row(team_id) or return ['', '']
     code = team[pick.to_s == '2' ? 3 : 2].to_s
@@ -284,10 +282,29 @@ class RaidEngine
     pas = PASSIVES[team[pick.to_s == '2' ? 3 : 2].to_s]
     { 'team' => team[1].to_s, 'passive' => pas ? pas[2] : '', 'desc' => pas ? pas[3] : '' }
   end
-  CREATURE_HEADER = %w[활성 이름 위치 크기 현재스킬 건강 내구도 마법능력 민첩 기술 행운 비고 보상크레딧 명중기본 회피기본 방향 스킬목록 이미지 패배압수].freeze
+  CREATURE_HEADER = %w[활성 이름 위치 크기 현재스킬 건강 내구도 마법능력 민첩 기술 행운 비고 보상골드 명중기본 회피기본 방향 스킬목록 이미지 패배압수].freeze
+
+  # 예전 데이터 파일: "보스" → "크리쳐", "크레딧" → "골드" (표 이름, 칸 제목, 설명 글). 한 번만 한다.
+  def rename_creature_gold!
+    return if settings['renamed_creature_gold']
+    cb = @store.book('creature')
+    cb['크리쳐스킬'] ||= cb.delete('보스스킬') if cb.key?('보스스킬')
+    fix = lambda do |v|
+      v.gsub(/크리쳐 ?\(보스몹?\)/, '크리쳐').gsub('보스몹', '크리쳐').gsub('보스', '크리쳐')
+       .gsub('크레딧을', '골드를').gsub('크레딧이', '골드가').gsub('크레딧은', '골드는')
+       .gsub('크레딧과', '골드와').gsub('크레딧으로', '골드로').gsub('크레딧', '골드')
+    end
+    @store.to_h['books'].each_value do |tabs|
+      tabs.each_value do |rows|
+        Array(rows).each { |r| r.map! { |v| v.is_a?(String) ? fix.call(v) : v } if r.is_a?(Array) }
+      end
+    end
+    settings['renamed_creature_gold'] = true
+  end
 
   # 예전 데이터 파일에 새 칸(역할/이미지/스킬목록)을 붙이고, 순간이동을 1칸 이동으로 바꾼다.
   def migrate_tables!
+    rename_creature_gold!
     { ['runner', '스탯'] => RUNNER_HEADER, ['creature', '스탯'] => CREATURE_HEADER }.each do |(book, tab), header|
       rows = (@store.book(book)[tab] ||= [header.dup])
       rows[0] = header.dup if rows[0].nil? || rows[0].size < header.size
@@ -300,7 +317,7 @@ class RaidEngine
     end
     # 역할 이름은 탱/딜/힐 대신 수호/공격/지원
     table_rows('runner', '스탯').each { |r| r[13] = ROLE_RENAME.fetch(r[13].to_s, r[13].to_s) }
-    boss = @store.book('creature')['보스스킬'] || []
+    boss = @store.book('creature')['크리쳐스킬'] || []
     if boss[1..].to_a.any? { |r| r[0] == '탱커 버스터' } && boss[1..].to_a.none? { |r| r[0] == '집중 강타' }
       boss[1..].each do |r|
         r[0] = '집중 강타' if r[0] == '탱커 버스터'
@@ -407,7 +424,7 @@ class RaidEngine
     (@store.book(book)[tab] || [])[1..].to_a
   end
 
-  # 보스(크리쳐)에 지정된 스킬 목록. 비어 있으면 전체 보스 스킬을 쓴다.
+  # 크리쳐에 지정된 스킬 목록. 비어 있으면 전체 크리쳐 스킬을 쓴다.
   def boss_skill_list(creature_name)
     row = table_rows('creature', '스탯').find { |r| r[1].to_s.strip == creature_name.to_s.strip }
     row.to_a[16].to_s.split(',').map(&:strip).reject(&:empty?)
@@ -488,7 +505,7 @@ class RaidEngine
   TABLES = {
     'runners'     => ['runner', '스탯'],
     'creatures'   => ['creature', '스탯'],
-    'boss_skills' => ['creature', '보스스킬'],
+    'boss_skills' => ['creature', '크리쳐스킬'],
     'runner_skills' => ['app', '스킬'],
     'items' => ['app', '아이템'],
     'teams' => ['app', '팀']
@@ -566,7 +583,7 @@ class RaidEngine
   end
 
   def boss_skill_names
-    (@store.book('creature')['보스스킬'] || [])[1..].to_a.map { |r| r[0].to_s.strip }.reject(&:empty?)
+    (@store.book('creature')['크리쳐스킬'] || [])[1..].to_a.map { |r| r[0].to_s.strip }.reject(&:empty?)
   end
 
   # ── 전투 시작/종료 ──────────────────────────────────────────
@@ -658,12 +675,12 @@ class RaidEngine
     end
   end
 
-  # 보스 행동 지정 (기존 [보스행동커맨드/스킬/대상 또는 좌표] 와 같은 효과)
+  # 크리쳐 행동 지정 (기존 [크리쳐행동커맨드/스킬/대상 또는 좌표] 와 같은 효과)
   def boss_command!(session_id, skill:, targets: [], cells: [])
     s = @sessions[session_id.to_s] or raise '전투를 찾지 못했습니다.'
-    raise '지금은 보스 행동을 입력하는 단계가 아닙니다.' unless s.active && s.awaiting_boss
+    raise '지금은 크리쳐 행동을 입력하는 단계가 아닙니다.' unless s.active && s.awaiting_boss
     skill = skill.to_s.strip
-    raise '보스 스킬을 고르세요.' if skill.empty?
+    raise '크리쳐 스킬을 고르세요.' if skill.empty?
     override = { skill: skill }
     cells = Array(cells).map { |c| c.to_s.strip.upcase }.select { |c| BattleGrid.valid_pos?(c) }
     targets = Array(targets).map { |t| t.to_s.strip }.reject(&:empty?) & s.runner_names
@@ -679,7 +696,7 @@ class RaidEngine
     s.actions = {}
     s.processed_messages = {}
     s.start_time = Time.now
-    sheet_log(@creature_sheet, s.id, s.round, '보스행동 지정', "#{skill} #{(cells + targets).join(', ')}")
+    sheet_log(@creature_sheet, s.id, s.round, '크리쳐행동 지정', "#{skill} #{(cells + targets).join(', ')}")
     tick!
   end
 
@@ -691,7 +708,7 @@ class RaidEngine
     tick!
   end
 
-  # 승리: 보스에 정한 보상만큼 참여자 전원 크레딧 +, 패배(전원 전투불능): 정한 만큼 압수 (모자라면 마이너스)
+  # 승리: 크리쳐에 정한 보상만큼 참여자 전원 골드 +, 패배(전원 전투불능): 정한 만큼 압수 (모자라면 마이너스)
   def settle_credits!(s, text)
     crow = table_rows('creature', '스탯').find { |r| r[1].to_s.strip == s.creature[:name].to_s.strip }.to_a
     if text.start_with?('[승리]')
@@ -699,7 +716,7 @@ class RaidEngine
       return '' unless amount.positive?
       s.runner_names.each { |id| (row = runner_row(id)) && row[17] = (row[17].to_i + amount).to_s }
       @store.save!
-      "\n[보상] 참여자 전원 크레딧 +#{amount}"
+      "\n[보상] 참여자 전원 골드 +#{amount}"
     elsif text.start_with?('[패배]')
       amount = crow[18].to_i
       return '' unless amount.positive?
@@ -710,7 +727,7 @@ class RaidEngine
         "#{display_of(id)} #{before} → #{row[17]}"
       end.compact
       @store.save!
-      "\n[압수] 참여자 전원 크레딧 -#{amount}\n#{lines.join("\n")}"
+      "\n[압수] 참여자 전원 골드 -#{amount}\n#{lines.join("\n")}"
     else
       ''
     end
@@ -729,7 +746,7 @@ class RaidEngine
     d.empty? ? id.to_s : d
   end
 
-  # 한 틱 전후를 비교해: 정산이 끝났으면 러너 스킬 → 보스 스킬 순으로, 새 라운드가 열리면 보스 전조를 알린다.
+  # 한 틱 전후를 비교해: 정산이 끝났으면 러너 스킬 → 크리쳐 스킬 순으로, 새 라운드가 열리면 크리쳐 전조를 알린다.
   def overlay_events!(s, before)
     if before[:phase] == :battle && s.phase != :battle
       before[:actions].each do |name, a|
@@ -750,12 +767,12 @@ class RaidEngine
     end
   end
 
-  # 보스가 노리는 러너 ID들 → 표시 이름
+  # 크리쳐가 노리는 러너 ID들 → 표시 이름
   def target_label(s, ids)
     ids.to_s.split(',').map(&:strip).reject(&:empty?).map { |t| s.runner_names.include?(t) ? display_of(t) : t }.join(', ')
   end
 
-  # 승리/패배 안내 (기존 봇은 조사봇 시트에 보상을 주며 안내했지만, 웹앱에서는 기록만 남긴다)
+  # 승리/패배 안내 (웹앱에서는 기록에 남긴다)
   def announce_finish!(s)
     return if s.instance_variable_get(:@web_finish_noted)
     s.instance_variable_set(:@web_finish_noted, true)

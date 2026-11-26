@@ -1,0 +1,7 @@
+.git
+app/data/raid.json
+app/data/raid.json.tmp
+app/data/img
+cloudflared.exe
+*.bat
+.env
