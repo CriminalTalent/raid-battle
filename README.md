@@ -140,27 +140,33 @@
 
 ## 4. 설치와 배포
 
-### Render
-- 저장소의 `render.yaml` 블루프린트로 Docker 웹 서비스를 만듭니다. 기본값은 **무료(free) 플랜**입니다.
-- Render: New → Blueprint → 이 저장소 선택 → `RAID_ADMIN_PASSWORD` 입력 → 만들기
-- `main` 에 수정이 합쳐지면 자동으로 다시 빌드·배포됩니다. 배포 중에는 잠깐 접속이 끊기고 **진행 중인 전투가 사라지므로** 행사가 없는 시간에 반영하세요.
-- 무료 플랜 주의
-  - 15분 동안 접속이 없으면 잠들고, 다음 접속 때 30초~1분 뒤에 깹니다. 행사 전에 한 번 열어 두세요.
-  - 디스크가 없어서 재시작·재배포 때 러너, 크리쳐, 스킬, 골드, 올린 이미지가 `app/data/sample.json` 예시 상태로 돌아갑니다.
-  - 데이터를 계속 남기려면 `render.yaml` 의 `plan: free` 를 `starter`(유료)로 바꾸고 `disk` 부분의 `#` 을 지우세요.
-- 상태 확인: `/api/battles` 가 응답하면 정상(헬스 체크 주소)
+### 서버에 올리기
+Ruby 3.3 이상만 있으면 어느 서버에서나 돌아갑니다. 따로 설치할 라이브러리나 데이터베이스는 없습니다.
+
+- Docker
+  ```
+  docker build -t raid .
+  docker run -d -p 80:4567 -e PORT=4567 -e RAID_ADMIN_PASSWORD=비밀번호 -v raid-data:/data raid
+  ```
+- Ruby 직접 실행
+  ```
+  PORT=4567 RAID_DATA_DIR=/srv/raid RAID_ADMIN_PASSWORD=비밀번호 ruby app/run.rb
+  ```
+- 클라우드 호스팅: Docker를 지원하는 곳이면 이 저장소를 연결해 그대로 올릴 수 있습니다. 환경 변수에 `RAID_ADMIN_PASSWORD` 를 넣고, 데이터를 남기려면 디스크(볼륨)를 붙여 `RAID_DATA_DIR` 로 지정하세요.
+- 상태 확인: `/api/battles` 가 응답하면 정상입니다(헬스 체크 주소).
+
+### 서버를 고를 때 확인할 것
+- **데이터 저장**: 모든 데이터는 `RAID_DATA_DIR` 폴더의 `raid.json` 과 `img/` 에 저장됩니다. 디스크가 없는 서버는 재시작·재배포 때 러너, 크리쳐, 스킬, 골드, 올린 이미지가 `app/data/sample.json` 예시 상태로 돌아갑니다.
+- **진행 중인 전투**: 메모리에만 있어서 서버가 다시 시작되면 사라집니다. 수정 반영(재배포)은 전투가 없는 시간에 하세요.
+- **잠드는 서버**: 일부 무료 호스팅은 한동안 접속이 없으면 서버를 재웁니다. 다음 접속 때 깨어나는 데 시간이 걸리고 진행 중인 전투도 사라지므로, 전투 전에 한 번 열어 두세요.
 
 ### 환경 변수
 | 변수 | 뜻 |
 |---|---|
 | `RAID_ADMIN_PASSWORD` | 관리자 비밀번호. 주면 켤 때마다 이 값으로 맞춤 (관리자 화면에서 바꿔도 재시작하면 이 값으로 돌아감) |
-| `RAID_DATA_DIR` | 데이터(raid.json, 이미지) 폴더. Render에서는 `/data` |
-| `PORT` | 열 포트. 주면 외부 접속(0.0.0.0)으로 열림. Render가 자동으로 넣음 |
+| `RAID_DATA_DIR` | 데이터(raid.json, 이미지) 폴더. 기본 `app/data`, Docker 이미지는 `/data` |
+| `PORT` | 열 포트. 주면 외부 접속(0.0.0.0)으로 열림. 호스팅 서비스가 자동으로 넣기도 함 |
 | `RAID_ACTION_SECONDS` | 행동 제한 시간(초). 기본 300 |
-
-### 다른 서버
-- Docker: `docker build -t raid .` → `docker run -d -p 80:4567 -e PORT=4567 -e RAID_ADMIN_PASSWORD=비밀번호 -v raid-data:/data raid`
-- Ruby: `PORT=4567 RAID_DATA_DIR=/srv/raid RAID_ADMIN_PASSWORD=비밀번호 ruby app/run.rb`
 
 ### 내 컴퓨터(Windows)에서 켜기
 1. https://rubyinstaller.org/downloads/ 에서 **WITHOUT DEVKIT** 의 `Ruby 3.3.x (x64)` 설치 (전부 기본값)
@@ -176,7 +182,7 @@
 ### 폴더 구조
 ```
 start.bat / share.bat   Windows 실행 파일
-Dockerfile / render.yaml 서버 배포 설정
+Dockerfile              서버 배포 설정 (render.yaml 은 Render용 예시)
 app/
   run.rb                실행 시작점 (포트, 관리자 비밀번호)
   server.rb             웹서버, 페이지 주소와 API
@@ -202,8 +208,8 @@ scout/                  조사 기능 자리 (추후 업로드 예정)
 ### 문제가 생겼을 때
 | 증상 | 확인할 것 |
 |---|---|
-| 화면이 안 열림 | 무료 플랜이면 잠든 상태일 수 있음. 1분 뒤 새로고침, 계속 안 되면 서버 로그 확인 |
+| 화면이 안 열림 | 서버가 잠든 상태일 수 있음. 1분 뒤 새로고침, 계속 안 되면 서버 로그 확인 |
 | 비밀번호를 잊음 | 서버의 `RAID_ADMIN_PASSWORD` 확인 또는 새로 넣고 저장 |
-| 데이터가 처음으로 돌아감 | 무료 플랜 재시작. 관리자 화면에서 다시 입력 |
+| 데이터가 처음으로 돌아감 | 디스크 없이 재시작된 경우. 디스크(볼륨)를 붙이거나 관리자 화면에서 다시 입력 |
 | 참여자 링크가 안 됨 | 전투가 끝났거나 서버 재시작. 새 전투를 만들어 링크 다시 전달 |
 | 진행이 멈춤 | 크리쳐 행동 지정 대기인지 확인. 행동 입력 중이면 [입력 마감] |
