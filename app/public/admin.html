@@ -141,7 +141,7 @@ function login(err) {
   view = null;
   $('root').innerHTML = `<div class="card" style="max-width:360px;margin:40px auto">
     <div class="card-h"><h2>관리자 로그인</h2></div>
-    <p class="sub">서버(Render 등)에서는 RAID_ADMIN_PASSWORD 에 넣은 값, 내 PC에서는 start.bat 창에 나온 비밀번호를 넣으세요. 5번 틀리면 10분 동안 잠겨요.</p>
+    <p class="sub">서버에서는 RAID_ADMIN_PASSWORD 에 넣은 값, 내 PC에서는 start.bat 창에 나온 비밀번호를 넣으세요. 5번 틀리면 10분 동안 잠겨요.</p>
     ${err ? `<div class="msg err">${esc(err)}</div>` : ''}
     <div class="btns" style="flex-wrap:nowrap"><input id="pw" type="password" autocomplete="current-password" autofocus><button class="primary" id="go">들어가기</button></div></div>`;
   const go = async () => {
