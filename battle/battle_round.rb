@@ -879,16 +879,8 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     end
     if guardian[:hp].to_i - dmg <= 0 && dmg > 0
       dmg = guardian[:hp].to_i - 1
-      if gs[:house].to_s.strip == '팀D' && gs[:passive].to_s == '2' && !ctx[:guard_used][name]
-        # 팀D 패시브2 보유자는 이 상황을 패시브 사용(전투 중 1회)으로 간주해
-        # 다음 라운드 행동불가 페널티를 받지 않는다.
-        ctx[:guard_used][name] = true
-        log << "#{display_name_of.call(name)}: 필사즉생 → 이번 라운드 흡수한 총 위력 #{total_power}, 최종 피해 #{dmg} (건강 0 이하 방지 — [팀D] 패시브로 페널티 면제)"
-      else
-        ctx[:action_locked] ||= {}
-        ctx[:action_locked][name] = true
-        log << "#{display_name_of.call(name)}: 필사즉생 → 이번 라운드 흡수한 총 위력 #{total_power}, 최종 피해 #{dmg} (건강 0 이하 방지, 다음 라운드 행동 불가)"
-      end
+      # 체력 1로 버틴다. 다음 라운드 행동 제한은 없다.
+      log << "#{display_name_of.call(name)}: 필사즉생 → 이번 라운드 흡수한 총 위력 #{total_power}, 최종 피해 #{dmg} (건강 0 이하 방지)"
     else
       log << "#{display_name_of.call(name)}: 필사즉생 → 이번 라운드 흡수한 총 위력 #{total_power}, 최종 피해 #{dmg}"
     end

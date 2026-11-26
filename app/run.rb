@@ -5,7 +5,7 @@ Encoding.default_external = 'UTF-8'
 require_relative 'server'
 
 # 내 PC: 기본값 그대로 (127.0.0.1:4567)
-# 서버(Render·Railway·Docker 등): PORT 를 주면 0.0.0.0 으로 열린다.
+# 서버(Docker, 클라우드 호스팅 등): PORT 를 주면 0.0.0.0 으로 열린다.
 #   RAID_DATA_DIR       데이터(raid.json, 이미지)를 둘 폴더 — 서버의 영구 디스크 경로
 #   RAID_ADMIN_PASSWORD 관리자 비밀번호 (주면 켤 때마다 이 값으로 맞춘다)
 port = (ENV['PORT'] || ENV['RAID_PORT'] || '4567').to_i
