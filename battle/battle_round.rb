@@ -147,11 +147,11 @@ end
 
 def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, view_sheet, creature, ctx)
   # 크리쳐가 이번 라운드 확정된 스킬로 러너 전용 지원/방어 스킬(흡수/철벽/
-  # 방어/주의분산/자가치유 등)을 쓰기로 되어 있으면, 4)보스패턴(공격 전용)
+  # 방어/주의분산/자가치유 등)을 쓰기로 되어 있으면, 4)크리쳐패턴(공격 전용)
   # 대신 러너와 동일한 1)지원/2)방어 처리 루프를 자기 자신을 대상으로 타도록
-  # 한다. 단, "보스스킬" 탭에 그 스킬명이 실제로 등록되어 있을 때만 허용한다
+  # 한다. 단, "크리쳐스킬" 탭에 그 스킬명이 실제로 등록되어 있을 때만 허용한다
   # (자동/수동 지정 모두 동일하게 적용) — 시트에 없으면 그냥 무시하고 기존
-  # 4)보스패턴 경로로 진행한다.
+  # 4)크리쳐패턴 경로로 진행한다.
   creature_skill_name = creature[:current_skill].to_s.strip
   creature_skill_def = BattleSkills.get(creature_skill_name)
   creature_boss_sheet_def = read_boss_skill_definition(creature_sheet, creature_skill_name)
@@ -160,7 +160,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     !BattleSkills.attack?(creature_skill_name) &&
     !creature_boss_sheet_def.empty?
   )
-  # 보스스킬 탭의 배율(E열)이 지정되어 있으면 그 값을 쓴다(크리쳐마다 다른
+  # 크리쳐스킬 탭의 배율(E열)이 지정되어 있으면 그 값을 쓴다(크리쳐마다 다른
   # 배율을 시트에서 조정 가능하게 함). BattleSkills::SKILLS(전역 상수)는
   # 건드리지 않고, ctx에 이번 라운드 한정 오버라이드 값만 저장해 아래
   # "1) 지원"/"2) 방어" 처리부에서 skill_name == creature_skill_name일 때만
@@ -176,7 +176,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
 
   runner_state = merge_runner_state(view_sheet, runner_sheet, runner_names, creature[:pos])
   base_stats   = runner_sheet.read_base_stats
-  # '__creature__'는 보스(크리쳐)가 러너와 동일한 지원/방어 스킬을 자기
+  # '__creature__'는 크리쳐가 러너와 동일한 지원/방어 스킬을 자기
   # 자신에게 사용할 때 쓰는 내부 전용 이름이다. stats_of/state_of가 이
   # 이름에 대해 크리쳐 객체를 반환하도록 해, 기존 러너 스킬 처리 루프를
   # 크리쳐도 그대로 통과할 수 있게 한다.
@@ -293,52 +293,52 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     next unless st && st[:hp].to_i > 0
 
     case s[:house].to_s.strip
-    when '그리핀도르'
+    when '팀A'
       if s[:passive] == '1' && creature && BattleCalculator.in_front?(creature[:pos], st[:pos], creature[:facing].to_s)
         b = (s[:dur].to_i * 0.5).ceil
         dur_bonus[name] += b
-        passive_lines << "#{display_name_of.call(name)}: [그리핀도르] 적 정면 1칸 — 내구도 +#{b}"
+        passive_lines << "#{display_name_of.call(name)}: [팀A] 적 정면 1칸 — 내구도 +#{b}"
       end
       if s[:passive] == '2' && st[:max_hp].to_i > 0 && st[:hp].to_f < st[:max_hp].to_i * 0.4
         b = (s[:atk].to_i * 0.5).ceil
         atk_bonus[name] += b
-        passive_lines << "#{display_name_of.call(name)}: [그리핀도르] 건강 40% 미만 — 마법능력 +#{b}"
+        passive_lines << "#{display_name_of.call(name)}: [팀A] 건강 40% 미만 — 마법능력 +#{b}"
       end
-    when '슬리데린'
+    when '팀B'
       if s[:passive] == '1' && ctx[:round].to_i > 1 && !ctx[:prev_took_damage][name]
         b = (s[:atk].to_i * 0.5).ceil
         atk_bonus[name] += b
-        passive_lines << "#{display_name_of.call(name)}: [슬리데린] 이전 라운드 무피해 — 마법능력 +#{b}"
+        passive_lines << "#{display_name_of.call(name)}: [팀B] 이전 라운드 무피해 — 마법능력 +#{b}"
       end
-      if s[:passive] == '2' && ctx[:slytherin_luck][name].to_i > 0
-        luck_bonus[name] += ctx[:slytherin_luck][name]
-        passive_lines << "#{display_name_of.call(name)}: [슬리데린] 관찰 보너스 — 행운 +#{ctx[:slytherin_luck][name]}"
+      if s[:passive] == '2' && ctx[:watchful_luck][name].to_i > 0
+        luck_bonus[name] += ctx[:watchful_luck][name]
+        passive_lines << "#{display_name_of.call(name)}: [팀B] 관찰 보너스 — 행운 +#{ctx[:watchful_luck][name]}"
       end
-    when '래번클로'
+    when '팀C'
       creature_has_ailment = !ctx[:confusion_active].nil? || !ctx[:blind_active].nil?
       if s[:passive] == '1' && creature_has_ailment
         b = (s[:atk].to_i * 0.5).ceil
         atk_bonus[name] += b
-        passive_lines << "#{display_name_of.call(name)}: [래번클로] 적 상태이상 감지 — 마법능력 +#{b}"
+        passive_lines << "#{display_name_of.call(name)}: [팀C] 적 상태이상 감지 — 마법능력 +#{b}"
       elsif s[:passive] == '2'
         prev_cat = BattleSkills.category(ctx[:prev_action][name])
         cur_cat  = BattleSkills.category(battle_actions[name]&.dig(:type))
         if prev_cat && cur_cat && prev_cat != cur_cat
           tec_bonus[name] += 10
-          passive_lines << "#{display_name_of.call(name)}: [래번클로] 행동 분류 변경 — 기술 +10"
+          passive_lines << "#{display_name_of.call(name)}: [팀C] 행동 분류 변경 — 기술 +10"
         end
       end
-    when '후플푸프'
+    when '팀D'
       if s[:passive] == '1' && ctx[:prev_took_damage][name]
         b = (s[:dur].to_i * 0.5).ceil
         dur_bonus[name] += b
-        passive_lines << "#{display_name_of.call(name)}: [후플푸프] 이전 라운드 피격 — 내구도 +#{b}"
+        passive_lines << "#{display_name_of.call(name)}: [팀D] 이전 라운드 피격 — 내구도 +#{b}"
       end
     end
   end
 
   if passive_lines.any?
-    log << '[기숙사 패시브]'
+    log << '[팀 패시브]'
     log.concat(passive_lines)
   end
 
@@ -403,7 +403,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       end
       log << "#{dname}의 #{skill_name} → #{healed.join(', ')}" if healed.any?
     when :heal_fixed_self
-      # 4) 보스 패턴 단계로 실행을 미룬다. 이번 라운드 방어/철벽 버프(2단계에서
+      # 4) 크리쳐 패턴 단계로 실행을 미룬다. 이번 라운드 방어/철벽 버프(2단계에서
       # 갱신됨)가 반영된 뒤에 피해를 계산하기 위함. 쿨타임/1회성 체크는
       # 여기서 이미 끝났으므로 값만 담아두고 실제 처리는 뒤에서 한다.
       pending_absorb = { name: name, skill: skill, skill_name: skill_name, s: s, actor: actor, dname: dname }
@@ -570,7 +570,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
       log << "#{dname}의 희생 → #{display_name_of.call(target_name)} 대신 피격 대기" if target
     when :dur_buff_area
       # 강화(atk_buff_area)와 동일하게, 캐스터 자신에게 이미 누적된 내구도
-      # 보너스(그리핀도르1 패시브 등)를 기준값에 포함해 계산한다.
+      # 보너스(팀A1 패시브 등)를 기준값에 포함해 계산한다.
       amount = ((s[:dur].to_i + dur_bonus[name].to_i) * skill[:ratio].to_f).ceil
       affected = []
       if name.to_s == '__creature__'
@@ -756,9 +756,9 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     end
   end
 
-  # 4) 보스 패턴/디버프
-  # 혼란 2중첩 도달 시 그 라운드 보스 패턴/기본 반격 둘 다 스킵한다.
-  # (기존에는 기본 반격 분기에서만 체크되어, 보스가 패턴 스킬을 쓰는
+  # 4) 크리쳐 패턴/디버프
+  # 혼란 2중첩 도달 시 그 라운드 크리쳐 패턴/기본 반격 둘 다 스킵한다.
+  # (기존에는 기본 반격 분기에서만 체크되어, 크리쳐가 패턴 스킬을 쓰는
   # 라운드에는 중첩이 차도 무시되고 있었다.)
   confused_out = ctx.delete(:confusion_pending_invalidate) == true
   if confused_out
@@ -849,17 +849,17 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
   end
 
   # 5) 크리쳐 반격 — 제거됨 (요청에 따라 기본 반격 기능 완전 삭제)
-  # 참고: '복수' 반사 로직은 battle_boss_patterns.rb(보스패턴 공격)에
+  # 참고: '복수' 반사 로직은 battle_boss_patterns.rb(크리쳐패턴 공격)에
   # 별도로 존재하므로, 이 기본 반격 제거는 복수 스킬 자체를 무력화하지 않음.
 
   runner_names.each do |name|
     s = stats_of.call(name)
-    if s[:house].to_s.strip == '슬리데린' && s[:passive] == '2' &&
+    if s[:house].to_s.strip == '팀B' && s[:passive] == '2' &&
        (battle_actions[name].nil? || battle_actions[name][:type] == '관찰')
       st = state_of.call(name)
       if st && st[:hp].to_i > 0
-        ctx[:slytherin_luck][name] += 10
-        log << "#{display_name_of.call(name)}: [슬리데린] 행동을 포기하고 상황을 살핍니다. (다음 라운드부터 행운 +10)"
+        ctx[:watchful_luck][name] += 10
+        log << "#{display_name_of.call(name)}: [팀B] 행동을 포기하고 상황을 살핍니다. (다음 라운드부터 행운 +10)"
       end
     end
   end
@@ -879,11 +879,11 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     end
     if guardian[:hp].to_i - dmg <= 0 && dmg > 0
       dmg = guardian[:hp].to_i - 1
-      if gs[:house].to_s.strip == '후플푸프' && gs[:passive].to_s == '2' && !ctx[:guard_used][name]
-        # 후플푸프 패시브2 보유자는 이 상황을 패시브 사용(전투 중 1회)으로 간주해
+      if gs[:house].to_s.strip == '팀D' && gs[:passive].to_s == '2' && !ctx[:guard_used][name]
+        # 팀D 패시브2 보유자는 이 상황을 패시브 사용(전투 중 1회)으로 간주해
         # 다음 라운드 행동불가 페널티를 받지 않는다.
         ctx[:guard_used][name] = true
-        log << "#{display_name_of.call(name)}: 필사즉생 → 이번 라운드 흡수한 총 위력 #{total_power}, 최종 피해 #{dmg} (건강 0 이하 방지 — [후플푸프] 패시브로 페널티 면제)"
+        log << "#{display_name_of.call(name)}: 필사즉생 → 이번 라운드 흡수한 총 위력 #{total_power}, 최종 피해 #{dmg} (건강 0 이하 방지 — [팀D] 패시브로 페널티 면제)"
       else
         ctx[:action_locked] ||= {}
         ctx[:action_locked][name] = true
@@ -916,7 +916,7 @@ def settle_round(battle_actions, runner_names, runner_sheet, creature_sheet, vie
     ctx[:blind_active] = nil
   end
 
-  # 혼란 "상태이상 있음" 표시(래번클로1 연동용)는 무효화 발동 라운드+
+  # 혼란 "상태이상 있음" 표시(팀C1 연동용)는 무효화 발동 라운드+
   # 다음 라운드까지만 유지하고, 그 이후 자동 소멸한다. 실제 행동봉쇄와는
   # 무관하며 오직 패시브 판정용 표시일 뿐이다.
   if ctx[:confusion_active] && ctx[:round].to_i >= ctx[:confusion_active][:expires_round].to_i
@@ -990,7 +990,7 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
   end
 
 
-  # 1툿: 행동 + 전장
+  # 1번 글: 행동 + 전장
   part1 = "#{runner_tags}
 
 #{title}
@@ -1032,7 +1032,7 @@ def build_result_text(runner_tags, battle_round, creature, battle_actions, runne
   BattleGrid.render(runner_state, creature).each { |line| part1 += "#{line}
 " }
 
-  # 2툿: 전투 로그 + 상태
+  # 2번 글: 전투 로그 + 상태
   # DM(direct) 발송 시 수신자 멘션이 없으면 게시는 되어도 상대방에게는
   # 보이지 않으므로, part1과 동일하게 runner_tags를 앞에 붙입니다.
   part2 = "#{runner_tags}

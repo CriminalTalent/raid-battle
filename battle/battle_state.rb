@@ -20,7 +20,7 @@ def parse_creature_stats_row(row)
   # J 기술
   # K 행운
   # L 비고
-  # M 보상크레딧 (처치 시 파티 전원에게 지급, 비어있으면 0)
+  # M 보상골드 (처치 시 파티 전원에게 지급, 비어있으면 0)
   name = row[1].to_s.strip
   return nil if name.empty?
 
@@ -67,22 +67,22 @@ def parse_creature_stats_row(row)
 end
 
 # ──────────────────────────────────────────────
-# 보스스킬 시트 캐시
+# 크리쳐스킬 시트 캐시
 #
-# 보스스킬 탭은 전투 중 값이 바뀌지 않는 정적 정의 데이터인데,
+# 크리쳐스킬 탭은 전투 중 값이 바뀌지 않는 정적 정의 데이터인데,
 # 예전에는 boss_skill_defined?/read_boss_skill_definition이 호출될 때마다
-# (라운드 안내, 보스행동커맨드 파싱 등에서 매우 자주 호출됨) 매번 시트를
-# 새로 읽어와 구글 시트 API 할당량 소모의 큰 원인이 되었다.
+# (라운드 안내, 크리쳐행동커맨드 파싱 등에서 매우 자주 호출됨) 매번 시트를
+# 새로 읽어와 시트 읽기 소모의 큰 원인이 되었다.
 # 봇 프로세스가 살아있는 동안은 1회만 읽고 메모리에 캐시한다.
-# 운영 중 보스스킬 탭을 직접 수정했다면 봇을 재시작하거나,
+# 운영 중 크리쳐스킬 탭을 직접 수정했다면 봇을 재시작하거나,
 # 관리자 명령으로 $boss_skill_cache = nil 처리 후 재호출하면 다시 로드된다.
 # ──────────────────────────────────────────────
 $boss_skill_cache = nil
 
 def load_boss_skill_cache!(creature_sheet)
-  rows = creature_sheet.read('보스스킬!A2:L300') rescue []
+  rows = creature_sheet.read('크리쳐스킬!A2:L300') rescue []
   $boss_skill_cache = rows
-  puts "[전투봇] 보스스킬 캐시 로드 완료 (#{rows.size}행)"
+  puts "[전투봇] 크리쳐스킬 캐시 로드 완료 (#{rows.size}행)"
   rows
 end
 
@@ -90,7 +90,7 @@ def boss_skill_rows(creature_sheet)
   $boss_skill_cache ||= load_boss_skill_cache!(creature_sheet)
 end
 
-# 보스스킬 탭 최종 구조:
+# 크리쳐스킬 탭 최종 구조:
 # A 스킬명, B 분류, C 범위, D 쿨타임, E 배율, F 디버프,
 # G 피해공식, H 범위형태, I 이동회피, J 대상수, K 설명, L 전조
 def read_boss_skill_definition(creature_sheet, skill_name)
@@ -115,7 +115,7 @@ def read_boss_skill_definition(creature_sheet, skill_name)
     omen:           row[11].to_s.strip
   }
 rescue => e
-  puts "[전투봇] 보스스킬 읽기 실패: #{e.class}: #{e.message}"
+  puts "[전투봇] 크리쳐스킬 읽기 실패: #{e.class}: #{e.message}"
   {}
 end
 
@@ -127,13 +127,13 @@ def apply_boss_skill_definition!(creature, creature_sheet)
 
   creature.merge!(definition)
 
-  # 스탯 탭에서는 현재스킬만 운영하고, 세부값은 보스스킬 탭 기본값을 사용합니다.
+  # 스탯 탭에서는 현재스킬만 운영하고, 세부값은 크리쳐스킬 탭 기본값을 사용합니다.
   creature[:pattern_multiplier] = definition[:skill_multiplier_default] if creature[:pattern_multiplier].to_s.strip.empty?
   creature[:debuff] = definition[:skill_debuff_default] if creature[:debuff].to_s.strip.empty?
   creature[:pattern_cooldown] = definition[:skill_cooldown_default] if creature[:pattern_cooldown].to_s.strip.empty?
 
-  # 보스스킬 탭 범위가 좌표 목록이면 패턴 좌표로 사용합니다.
-  # 숫자 범위는 battle_boss_patterns.rb에서 보스 점유칸 기준 거리로 처리합니다.
+  # 크리쳐스킬 탭 범위가 좌표 목록이면 패턴 좌표로 사용합니다.
+  # 숫자 범위는 battle_boss_patterns.rb에서 크리쳐 점유칸 기준 거리로 처리합니다.
   if creature[:skill_range].to_s.strip.empty?
     range_default = definition[:skill_range_default].to_s.strip
     if BattleGrid.parse_cell_list(range_default).any?
@@ -145,7 +145,7 @@ def apply_boss_skill_definition!(creature, creature_sheet)
   creature
 end
 
-# 라운드 안내 시점에 스탯 탭 E열(현재스킬)과 보스스킬 탭 정의를 다시 읽어 반영합니다.
+# 라운드 안내 시점에 스탯 탭 E열(현재스킬)과 크리쳐스킬 탭 정의를 다시 읽어 반영합니다.
 # (체력/위치 등 전투 진행 상태는 세션 값을 유지)
 def refresh_creature_skill!(creature, creature_sheet)
   name = creature[:name].to_s.strip
@@ -426,7 +426,7 @@ def validate_action(username, action_type, action_target, runner_names, view_she
   skill = BattleSkills.get(action_type)
   return [false, '알 수 없는 행동입니다.'] unless skill
 
-  # 크리쳐(보스) 전용 스킬은 러너가 사용할 수 없습니다.
+  # 크리쳐 전용 스킬은 러너가 사용할 수 없습니다.
   if ['지정공격1인', '지정공격다인', '범위공격', '전체공격'].include?(action_type.to_s)
     return [false, "#{action_type}은(는) 크리쳐 전용 스킬입니다."]
   end
@@ -548,7 +548,7 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
   end
 
   # [관찰]: 의도적으로 턴을 넘기는 명령. 행동 인원으로 집계되어 라운드 대기를 끝냅니다.
-  # (슬리데린 패시브 2번은 관찰/미행동 시 다음 라운드부터 행운 +10)
+  # (팀B 패시브 2번은 관찰/미행동 시 다음 라운드부터 행운 +10)
   if text.match?(/\[관찰\]/)
     battle_actions[username] = { type: '관찰', target: '' }
     processed_messages[username] = true
@@ -564,7 +564,7 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
     # 단, 대괄호 명령처럼 보이는데 형식만 틀린 경우에만 안내합니다.
     if text.match?(/\[[^\]]+\]/)
       puts "[전투봇] 행동 형식 불일치: @#{username} -> #{text}"
-      listener.send_dm(username, '형식이 올바르지 않습니다. [공격/보스이름], [스킬명/대상], [방어/아이디], [순간이동/좌표]  중 하나로 입력해주세요.')
+      listener.send_dm(username, '형식이 올바르지 않습니다. [공격/크리쳐이름], [스킬명/대상], [방어/아이디], [순간이동/좌표]  중 하나로 입력해주세요.')
     else
       puts "[전투봇] 비명령 메시지 무시: @#{username} -> #{text}"
     end
@@ -685,7 +685,7 @@ def record_battle_action(username, text, battle_actions, processed_messages, pro
   puts "[전투봇] 행동 등록 완료: #{username} → [#{action_type}/#{action_target}]"
 end
 
-# 보스스킬 탭에 정의된 스킬명인지 확인 (공백 무시 비교 포함)
+# 크리쳐스킬 탭에 정의된 스킬명인지 확인 (공백 무시 비교 포함)
 def boss_skill_defined?(creature_sheet, name)
   n = name.to_s.strip
   return false if n.empty?

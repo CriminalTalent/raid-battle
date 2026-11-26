@@ -315,7 +315,7 @@ input, select, textarea { border-radius: 2px; }
 .pop { position: fixed; z-index: 50; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; padding: 8px 10px; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,.35); }
 .pop .btns { margin-top: 6px; display: flex; gap: 6px; }
 
-/* 보스 방향: 머리 칸 가장자리에 크고 밝은 화살표 */
+/* 크리쳐 방향: 머리 칸 가장자리에 크고 밝은 화살표 */
 .cell .arrow { position: absolute; font-size: 22px; line-height: 1; color: #fff; text-shadow: 0 0 2px #000, 0 0 6px var(--boss), 0 0 10px var(--boss); z-index: 3; top: auto; right: auto; animation: arrowPulse 1.2s ease-in-out infinite; }
 .cell .arrow.f-하 { bottom: -9px; left: 50%; transform: translateX(-50%); }
 .cell .arrow.f-상 { top: -9px; left: 50%; transform: translateX(-50%); }

@@ -2,7 +2,7 @@
 const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
 const ROWS = [1, 2, 3, 4, 5, 6, 7, 8];
 const ARROW = { '상': '▲', '하': '▼', '좌': '◀', '우': '▶' };
-const PHASE = { lobby: '참여자 준비 중', prep: '시작 위치 입력', boss_command: '보스 행동 대기 (진행자가 고르는 중)', announcing: '라운드 준비', battle: '행동 입력', settling: '정산 중' };
+const PHASE = { lobby: '참여자 준비 중', prep: '시작 위치 입력', boss_command: '크리쳐 행동 대기 (진행자가 고르는 중)', announcing: '라운드 준비', battle: '행동 입력', settling: '정산 중' };
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const pct = (hp, max) => Math.max(0, Math.min(100, Math.round(hp / Math.max(max, 1) * 100)));
@@ -241,7 +241,7 @@ function keepInputs(draw) {
   if (focus) { const i = document.getElementById(focus[0]); if (i) { i.focus(); try { i.setSelectionRange(focus[1], focus[2]); } catch {} } }
 }
 
-/* 발동 오버레이: "(누구) 스킬 「이름」 발동", 보스 전조, 보스 스킬, 전투 결과를 화면 가운데 잠깐 띄운다.
+/* 발동 오버레이: "(누구) 스킬 「이름」 발동", 크리쳐 전조, 크리쳐 스킬, 전투 결과를 화면 가운데 잠깐 띄운다.
    처음 연 순간의 지난 알림은 다시 띄우지 않는다. */
 const ovl = { seen: {}, queue: [], busy: false };
 function overlayEvents(battles) {
@@ -261,7 +261,7 @@ function showNextOverlay() {
   if (e.kind === 'end') return showResult(e);
   const T = {
     skill: [esc(e.who), `스킬 「${esc(e.name)}」 발동`, e.text ? '대상 ' + esc(e.text) : ''],
-    boss: [esc(e.who), `보스 스킬 「${esc(e.name)}」 발동`, e.text ? '대상 ' + esc(e.text) : ''],
+    boss: [esc(e.who), `크리쳐 스킬 「${esc(e.name)}」 발동`, e.text ? '대상 ' + esc(e.text) : ''],
     target: ['◎ 표적', `${esc(e.text)}`, `${esc(e.who)}이(가) 노립니다${e.name ? ' · 「' + esc(e.name) + '」' : ''}`],
     omen: ['⚠ 전조', esc(e.text), e.name ? `${esc(e.who)} · 「${esc(e.name)}」` : esc(e.who)],
     end: [esc(e.who), esc(e.name), '']

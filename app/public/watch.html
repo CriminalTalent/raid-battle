@@ -74,7 +74,7 @@ function draw() {
       <div class="sub">${b.active ? (b.phase === 'battle' ? '행동 입력 마감까지' : b.phase === 'prep' ? '시작 위치 입력 마감까지' : b.phase === 'lobby' ? '참여자들이 준비하는 중이에요' : esc(PHASE[b.phase] || '')) : '전투가 끝났습니다'}</div>
     </div>
     <div>
-      <div class="card"><div class="panel-h boss">보스</div>${bossCardHTML(b)}</div>
+      <div class="card"><div class="panel-h boss">크리쳐</div>${bossCardHTML(b)}</div>
       <div class="card"><div class="card-h"><h2>응원하기</h2><span class="sub">${esc(myName)} 님 · <a href="#" id="rename">이름 바꾸기</a></span></div>
         ${cheerMsg ? `<div class="msg err">${esc(cheerMsg)}</div>` : ''}
         ${b.active ? `<div class="cheerbtns">${Object.entries(CHEERS).map(([k, t]) => `<button data-cheer="${k}">${t}<span class="n">${b.cheers?.counts?.[k] || ''}</span></button>`).join('')}</div>` : '<div class="sub">끝난 전투에는 응원할 수 없어요.</div>'}

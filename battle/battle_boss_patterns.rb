@@ -180,7 +180,7 @@ module BattleBossPatterns
       return 0
     end
 
-    # 회피 판정: 보스의 모든 피해 패턴에 자동 적용 (민첩 버프 포함)
+    # 회피 판정: 크리쳐의 모든 피해 패턴에 자동 적용 (민첩 버프 포함)
     base_agi = stats[:agi].to_i
     base_agi = runner[:agi].to_i if base_agi <= 0 && runner[:agi]
     eff_agi = base_agi + (agi_bonus ? agi_bonus[name].to_i : 0)
@@ -208,11 +208,11 @@ module BattleBossPatterns
       log << "#{dname} 보호막 #{blocked} 흡수"
     end
 
-    if stats[:house].to_s.strip == '후플푸프' && stats[:passive].to_s == '2' &&
+    if stats[:house].to_s.strip == '팀D' && stats[:passive].to_s == '2' &&
        ctx[:guard_used] && !ctx[:guard_used][name] && runner[:hp].to_i - dmg <= 0 && dmg > 0
       dmg = runner[:hp].to_i - 1
       ctx[:guard_used][name] = true
-      log << "#{dname}: [후플푸프] 전투 중 1회 — 건강 0 이하 방지"
+      log << "#{dname}: [팀D] 전투 중 1회 — 건강 0 이하 방지"
     end
     runner[:hp] = [runner[:hp].to_i - dmg, 0].max
     took_damage[name] = true if took_damage && dmg > 0
@@ -302,7 +302,7 @@ module BattleBossPatterns
     raw_power = pattern_damage(creature, multiplier)
     shape = range_shape(creature)
 
-    # 현재스킬이 범위공격/전체공격/디버프가 아니더라도 보스스킬 탭의 분류/범위/대상으로 처리합니다.
+    # 현재스킬이 범위공격/전체공격/디버프가 아니더라도 크리쳐스킬 탭의 분류/범위/대상으로 처리합니다.
     if name == '전체공격' || shape == '전체' || creature[:skill_range_default].to_s.strip == '전체'
       log_skill_header(log, creature, name, raw_power, '전체', debuff)
       targets = living_runners(runner_state)
